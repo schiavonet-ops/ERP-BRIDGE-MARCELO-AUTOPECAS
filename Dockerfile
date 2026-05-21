@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 RUN mkdir -p data
 
-RUN echo "*/15 * * * * cd /app && PYTHONPATH=/app python3 -m core.sync_worker delta >> /app/data/cron.log 2>&1" | crontab -
+RUN echo "*/15 * * * * cd /app && PYTHONPATH=/app /usr/local/bin/python3 -m core.sync_worker delta >> /app/data/cron.log 2>&1" | crontab -
 
 ENV PYTHONPATH=/app
 ENV FB_DLL=/usr/lib/x86_64-linux-gnu/libfbclient.so.2
