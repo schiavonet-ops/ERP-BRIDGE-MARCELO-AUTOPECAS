@@ -1,19 +1,27 @@
 """
 core/sync_worker.py — Sincronização Enfoque ↔ banco local
-Estoque fica em PRODUTOINVENTARIO.PRO_QTDE (não em PRODUTO)
+Compatível com Linux (VPS) e Windows (PC local)
 """
 
 import fdb
+import fdb.fbcore as _fbcore
+_fbcore.b2u = lambda st, cs: st.decode('cp1252', errors='replace') if isinstance(st, bytes) else st
+
 import os
+import sys
 from datetime import datetime
 from core.local_db import upsert_produtos, pendentes, marcar_enviado, marcar_erro, log
 
-FBCLIENT  = os.getenv("FB_DLL",      r"C:\Program Files\Firebird\Firebird_3_0\fbclient.dll")
-HOST      = os.getenv("FB_HOST",     "168.205.222.164")
-PORT      = int(os.getenv("FB_PORT", 3050))
-DATABASE  = os.getenv("FB_DATABASE", r"C:\Enfoque\ERP\Data\erp.fdb")
-USER      = os.getenv("FB_USER",     "SYSDBA")
-PASSWORD  = os.getenv("FB_PASSWORD", "masterkey")
+if sys.platform == "win32":
+    FBCLIENT = os.getenv("FB_DLL", r"C:\Program Files\Firebird\Firebird_3_0\fbclient.dll")
+else:
+    FBCLIENT = os.getenv("FB_DLL", "/usr/lib/x86_64-linux-gnu/libfbclient.so.2")
+
+HOST     = os.getenv("FB_HOST",     "168.205.222.164")
+PORT     = int(os.getenv("FB_PORT", 3050))
+DATABASE = os.getenv("FB_DATABASE", r"C:\Enfoque\ERP\Data\erp.fdb")
+USER     = os.getenv("FB_USER",     "SYSDBA")
+PASSWORD = os.getenv("FB_PASSWORD", "masterkey")
 
 _api_loaded = False
 
@@ -22,7 +30,11 @@ def _conectar():
     if not _api_loaded:
         fdb.load_api(FBCLIENT)
         _api_loaded = True
-    return fdb.connect(host=HOST, port=PORT, database=DATABASE, user=USER, password=PASSWORD)
+    return fdb.connect(
+        host=HOST, port=PORT, database=DATABASE,
+        user=USER, password=PASSWORD,
+        charset='NONE'
+    )
 
 def enfoque_online() -> bool:
     try:
@@ -49,7 +61,6 @@ def puxar_enfoque(delta_desde=None) -> int:
         filtro = "AND p.PRO_DATAALTERACAO >= ?"
         params.append(delta_desde)
 
-    # Estoque vem de PRODUTOINVENTARIO via JOIN
     cur.execute(f"""
         SELECT
             p.PRO_CODIGO,
@@ -61,7 +72,6 @@ def puxar_enfoque(delta_desde=None) -> int:
             COALESCE(inv.PRO_CUSTOUNI, 0)  AS CUSTO_UNI,
             p.PRO_MARCA,
             p.PRO_GRUPO,
-            
             p.PRO_DATAALTERACAO
         FROM PRODUTO p
         LEFT JOIN (
@@ -88,7 +98,7 @@ def puxar_enfoque(delta_desde=None) -> int:
             "estoque_min":    0.0,
             "marca":          str(row[7] or ""),
             "grupo":          str(row[8] or ""),
-            "memo": "",
+            "memo":           "",
         })
     con.close()
 
@@ -134,7 +144,6 @@ def enviar_fila() -> dict:
     return {"enviados": enviados, "erros": erros}
 
 def _aplicar_firebird(cur, item):
-    """Atualiza PRODUTOINVENTARIO no Enfoque."""
     codigo = item["codigo_produto"]
     qtde   = item["quantidade"]
     op     = item["operacao"]
@@ -153,14 +162,12 @@ def _aplicar_firebird(cur, item):
         elif op == "entrada":
             novo = atual + qtde
         else:
-            novo = qtde  # ajustar
-
+            novo = qtde
         cur.execute(
             "UPDATE PRODUTOINVENTARIO SET PRO_QTDE = ? WHERE PRO_CODIGO = ?",
             (novo, inv_codigo)
         )
     else:
-        # Cria registro de inventário se não existir
         if op in ("entrada", "ajustar"):
             cur.execute(
                 "INSERT INTO PRODUTOINVENTARIO (PRO_PRODUTO, PRO_QTDE) VALUES (?, ?)",
@@ -173,7 +180,6 @@ def _aplicar_firebird(cur, item):
     )
 
 if __name__ == "__main__":
-    import sys
     cmd = sys.argv[1] if len(sys.argv) > 1 else "delta"
     if cmd == "completo":
         puxar_enfoque()
