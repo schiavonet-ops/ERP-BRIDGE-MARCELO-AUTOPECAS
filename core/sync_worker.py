@@ -9,7 +9,7 @@ _fbcore.b2u = lambda st, cs: st.decode('cp1252', errors='replace') if isinstance
 
 import os
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from core.local_db import upsert_produtos, pendentes, marcar_enviado, marcar_erro, log
 
 if sys.platform == "win32":
@@ -143,37 +143,104 @@ def enviar_fila() -> dict:
     log("sync_ok" if erros == 0 else "erro", f"Fila: {enviados} enviados, {erros} erros")
     return {"enviados": enviados, "erros": erros}
 
+def _get_estoque_atual(cur, codigo):
+    """Retorna estoque atual do produto via MOVESTOQUE (igual ao Enfoque)"""
+    cur.execute("""
+        SELECT FIRST 1
+            MOV_ESTOQUE, MOV_QTDE, MOV_NOTAENTRADA,
+            MOV_CUSTO, MOV_CUSTOMEDIO, MOV_CUSTOPROPRIO,
+            MOV_PRECO, MOV_PRECOMINIMO
+        FROM MOVESTOQUE
+        WHERE MOV_PRODUTO = ? AND MOV_ISEXCLUIDO = 0
+        ORDER BY MOV_CODIGO DESC
+    """, (codigo,))
+    row = cur.fetchone()
+    if not row:
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    mov_estoque = float(row[0] or 0)
+    mov_qtde    = float(row[1] or 0)
+    nota_entrada = row[2]
+    # Entrada: stock = MOV_ESTOQUE + MOV_QTDE | Saída: stock = MOV_ESTOQUE
+    if nota_entrada is not None:
+        estoque_atual = mov_estoque + mov_qtde
+    else:
+        estoque_atual = mov_estoque
+    custo       = float(row[3] or 0)
+    custo_medio = float(row[4] or 0)
+    custo_prop  = float(row[5] or 0)
+    preco       = float(row[6] or 0)
+    preco_min   = float(row[7] or 0)
+    return estoque_atual, custo, custo_medio, custo_prop, preco, preco_min
+
 def _aplicar_firebird(cur, item):
     codigo = item["codigo_produto"]
-    qtde   = item["quantidade"]
     op     = item["operacao"]
 
-    cur.execute(
-        "SELECT PRO_CODIGO, PRO_QTDE FROM PRODUTOINVENTARIO WHERE PRO_PRODUTO = ? ORDER BY PRO_CODIGO DESC",
-        (codigo,)
-    )
-    row = cur.fetchone()
+    estoque_atual, custo, custo_medio, custo_prop, preco, preco_min = _get_estoque_atual(cur, codigo)
 
-    if row:
-        inv_codigo = row[0]
-        atual = float(row[1] or 0)
-        if op == "baixar":
-            novo = atual - qtde
-        elif op == "entrada":
-            novo = atual + qtde
-        else:
-            novo = qtde
-        cur.execute(
-            "UPDATE PRODUTOINVENTARIO SET PRO_QTDE = ? WHERE PRO_CODIGO = ?",
-            (novo, inv_codigo)
-        )
+    if op == "ajustar":
+        qtde_nova = float(item.get("quantidade_nova", item.get("quantidade", 0)))
+        qtde_ajuste = qtde_nova - estoque_atual
+    elif op == "entrada":
+        qtde_ajuste = float(item["quantidade"])
+    elif op == "baixar":
+        qtde_ajuste = -float(item["quantidade"])
     else:
-        if op in ("entrada", "ajustar"):
-            cur.execute(
-                "INSERT INTO PRODUTOINVENTARIO (PRO_PRODUTO, PRO_QTDE) VALUES (?, ?)",
-                (codigo, qtde)
-            )
+        qtde_ajuste = float(item.get("quantidade", 0))
 
+    if qtde_ajuste == 0:
+        return
+
+    hoje = date.today()
+
+    # 1. Cria NOTAENTRADA
+    cur.execute("SELECT GEN_ID(NOTAENTRADA, 1) FROM RDB" + chr(36) + "DATABASE")
+    not_codigo = cur.fetchone()[0]
+
+    descricao = f"Ajuste via bridge OS  data: {hoje.strftime('%d/%m/%Y')}  hora: {datetime.now().strftime('%H:%M:%S')}"
+    cur.execute("""
+        INSERT INTO NOTAENTRADA (
+            NOT_CODIGO, NOT_FICHA, NOT_TIPO, NOT_COMPROVANTE,
+            NOT_DATA, NOT_DATAEMISSAO, NOT_DATASAIDA,
+            NOT_DESCRICAO, NOT_ISATIVO, NOT_DATAALTERACAO
+        ) VALUES (?, 1, 2, 'SN', ?, ?, ?, ?, 1, ?)
+    """, (not_codigo, hoje, hoje, hoje, descricao, datetime.now()))
+
+    # 2. Cria MOVESTOQUE
+    cur.execute("SELECT GEN_ID(MOVESTOQUE, 1) FROM RDB" + chr(36) + "DATABASE")
+    mov_codigo = cur.fetchone()[0]
+
+    cur.execute("""
+        INSERT INTO MOVESTOQUE (
+            MOV_CODIGO, MOV_NOTAENTRADA, MOV_PRODUTO, MOV_UNIDADE,
+            MOV_DATA, MOV_HORAEMISSAO, MOV_QTDE, MOV_QTDEMOV,
+            MOV_VALORUNI, MOV_VALORTOTAL, MOV_VALORTOTALLIQUIDO,
+            MOV_ESTOQUE, MOV_CUSTO, MOV_CUSTOMEDIO, MOV_CUSTOPROPRIO,
+            MOV_PRECO, MOV_PRECOMINIMO,
+            MOV_ISESTOQUE, MOV_ISCUSTO, MOV_ISEXCLUIDO,
+            MOV_ISTOTAL, MOV_ISLIVRE, MOV_ISDEVOLVIDO, MOV_QTDEDEV,
+            MOV_MEUSIMPLES, MOV_ISLIVRERECALCULAR,
+            MOV_CODPRODUTO, MOV_ORIGEM
+        ) VALUES (
+            ?, ?, ?, 1,
+            ?, ?, ?, ?,
+            0, 0, 0,
+            ?, ?, ?, ?,
+            ?, ?,
+            1, 0, 0,
+            0, 0, 0, 0,
+            0, 0,
+            ?, '0'
+        )
+    """, (
+        mov_codigo, not_codigo, codigo,
+        hoje, datetime.now(), qtde_ajuste, qtde_ajuste,
+        estoque_atual, custo, custo_medio, custo_prop,
+        preco, preco_min,
+        codigo
+    ))
+
+    # 3. Atualiza PRO_DATAALTERACAO no PRODUTO
     cur.execute(
         "UPDATE PRODUTO SET PRO_DATAALTERACAO = CURRENT_TIMESTAMP WHERE PRO_CODIGO = ?",
         (codigo,)
