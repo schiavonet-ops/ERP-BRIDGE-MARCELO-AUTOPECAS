@@ -144,10 +144,10 @@ def enviar_fila() -> dict:
     return {"enviados": enviados, "erros": erros}
 
 def _get_estoque_atual(cur, codigo):
-    """Retorna estoque atual do produto via MOVESTOQUE (igual ao Enfoque)"""
+    """Retorna estoque atual via PRODUTOINVENTARIO (fonte de verdade do Enfoque)
+    e custos/precos do MOVESTOQUE mais recente."""
     cur.execute("""
         SELECT FIRST 1
-            MOV_ESTOQUE, MOV_QTDE, MOV_NOTAENTRADA,
             MOV_CUSTO, MOV_CUSTOMEDIO, MOV_CUSTOPROPRIO,
             MOV_PRECO, MOV_PRECOMINIMO
         FROM MOVESTOQUE
@@ -155,22 +155,23 @@ def _get_estoque_atual(cur, codigo):
         ORDER BY MOV_CODIGO DESC
     """, (codigo,))
     row = cur.fetchone()
-    if not row:
-        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-    mov_estoque = float(row[0] or 0)
-    mov_qtde    = float(row[1] or 0)
-    nota_entrada = row[2]
-    # Entrada: stock = MOV_ESTOQUE + MOV_QTDE | Saída: stock = MOV_ESTOQUE
-    if nota_entrada is not None:
-        estoque_atual = mov_estoque + mov_qtde
+    if row:
+        custo       = float(row[0] or 0)
+        custo_medio = float(row[1] or 0)
+        custo_prop  = float(row[2] or 0)
+        preco       = float(row[3] or 0)
+        preco_min   = float(row[4] or 0)
     else:
-        estoque_atual = mov_estoque
-    custo       = float(row[3] or 0)
-    custo_medio = float(row[4] or 0)
-    custo_prop  = float(row[5] or 0)
-    preco       = float(row[6] or 0)
-    preco_min   = float(row[7] or 0)
-    return estoque_atual, custo, custo_medio, custo_prop, preco, preco_min
+        custo = custo_medio = custo_prop = preco = preco_min = 0.0
+
+    cur.execute("""
+        SELECT COALESCE(SUM(PRO_QTDE), 0)
+        FROM PRODUTOINVENTARIO
+        WHERE PRO_PRODUTO = ?
+    """, (codigo,))
+    estoque = float(cur.fetchone()[0] or 0)
+
+    return estoque, custo, custo_medio, custo_prop, preco, preco_min
 
 def _aplicar_firebird(cur, item):
     codigo = item["codigo_produto"]
