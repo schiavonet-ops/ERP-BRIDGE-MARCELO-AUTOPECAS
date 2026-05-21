@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# Instala Firebird client e cron
 RUN apt-get update && \
     apt-get install -y libfbclient2 cron && \
     rm -rf /var/lib/apt/lists/*
@@ -13,7 +12,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 RUN mkdir -p data
 
-# Cron a cada 15 minutos
 RUN echo "*/15 * * * * cd /app && PYTHONPATH=/app python core/sync_worker.py delta >> /app/data/cron.log 2>&1" | crontab -
 
 ENV PYTHONPATH=/app
@@ -27,5 +25,7 @@ ENV FB_CHARSET=WIN1252
 
 EXPOSE 8000
 
-# Inicia cron + API (sem sync no boot para não travar)
-CMD service cron start && uvicorn api.main:app --host 0.0.0.0 --port 8000
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
+
+CMD ["/start.sh"]
