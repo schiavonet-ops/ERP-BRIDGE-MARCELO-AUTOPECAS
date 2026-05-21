@@ -61,7 +61,7 @@ def puxar_enfoque(delta_desde=None) -> int:
             COALESCE(inv.PRO_CUSTOUNI, 0)  AS CUSTO_UNI,
             p.PRO_MARCA,
             p.PRO_GRUPO,
-            p.PRO_MEMO,
+            
             p.PRO_DATAALTERACAO
         FROM PRODUTO p
         LEFT JOIN (
@@ -77,13 +77,7 @@ def puxar_enfoque(delta_desde=None) -> int:
     """, params)
 
     produtos = []
-    for row in cur.fetchall():
-        memo = row[9]
-        if hasattr(memo, 'read'):
-            memo = memo.read()
-        if isinstance(memo, bytes):
-            memo = memo.decode('latin-1', errors='ignore')
-
+    for row in cur:
         produtos.append({
             "codigo":         row[0],
             "nome":           row[1] or "",
@@ -94,7 +88,7 @@ def puxar_enfoque(delta_desde=None) -> int:
             "estoque_min":    0.0,
             "marca":          str(row[7] or ""),
             "grupo":          str(row[8] or ""),
-            "memo":           memo or "",
+            "memo": "",
         })
     con.close()
 
