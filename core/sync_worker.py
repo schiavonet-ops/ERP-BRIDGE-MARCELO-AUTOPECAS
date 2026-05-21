@@ -186,17 +186,15 @@ def _aplicar_firebird(cur, item):
         qtde_ajuste = float(item["quantidade"])
     elif op == "baixar":
         qtde_ajuste = -float(item["quantidade"])
-    else:
-        qtde_ajuste = float(item.get("quantidade", 0))
-
-
     elif op == "atualizar_memo":
         memo = item.get("referencia", "")
         cur.execute(
             "UPDATE PRODUTO SET PRO_MEMO = ?, PRO_DATAALTERACAO = CURRENT_TIMESTAMP WHERE PRO_CODIGO = ?",
             (memo, codigo)
         )
-
+        return
+    else:
+        qtde_ajuste = float(item.get("quantidade", 0))
     if qtde_ajuste == 0:
         return
 
