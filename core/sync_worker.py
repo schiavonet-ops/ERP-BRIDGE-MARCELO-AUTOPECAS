@@ -73,7 +73,7 @@ def puxar_enfoque(delta_desde=None) -> int:
             p.PRO_MARCA,
             p.PRO_GRUPO,
             p.PRO_DATAALTERACAO,
-            CAST(p.PRO_MEMO AS VARCHAR(2000)) AS PRO_MEMO,
+            CAST(SUBSTRING(p.PRO_MEMO FROM 1 FOR 8000) AS VARCHAR(8000)) AS PRO_MEMO,
             p.PRO_NCM,
             p.PRO_CODBARRA2,
             p.PRO_SECAO
