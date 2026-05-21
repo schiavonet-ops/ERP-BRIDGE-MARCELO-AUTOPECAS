@@ -72,7 +72,11 @@ def puxar_enfoque(delta_desde=None) -> int:
             COALESCE(inv.PRO_CUSTOUNI, 0)  AS CUSTO_UNI,
             p.PRO_MARCA,
             p.PRO_GRUPO,
-            p.PRO_DATAALTERACAO
+            p.PRO_DATAALTERACAO,
+            p.PRO_MEMO,
+            p.PRO_NCM,
+            p.PRO_CODBARRA2,
+            p.PRO_SECAO
         FROM PRODUTO p
         LEFT JOIN (
             SELECT PRO_PRODUTO, SUM(PRO_QTDE) AS PRO_QTDE, MAX(PRO_CUSTOUNI) AS PRO_CUSTOUNI
@@ -98,7 +102,10 @@ def puxar_enfoque(delta_desde=None) -> int:
             "estoque_min":    0.0,
             "marca":          str(row[7] or ""),
             "grupo":          str(row[8] or ""),
-            "memo":           "",
+            "memo":           str(row[10] or ""),
+            "ncm":            str(row[11] or ""),
+            "cod_barras2":    str(row[12] or ""),
+            "subgrupo":       str(row[13] or ""),
         })
     con.close()
 
