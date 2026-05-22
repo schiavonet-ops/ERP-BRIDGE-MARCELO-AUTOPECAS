@@ -57,9 +57,12 @@ class ProdutoAtualizar(BaseModel):
     localizacao: Optional[str] = None      # PRO_LOCALIZACAO (max 50)
     aplicacao: Optional[str] = None        # parte 1 do PRO_MEMO
     conversao: Optional[str] = None        # parte 2 do PRO_MEMO
-    grupo_codigo: Optional[int] = None     # PRO_GRUPO
-    secao_codigo: Optional[int] = None     # PRO_SECAO
-    marca_codigo: Optional[int] = None     # PRO_MARCA
+    grupo_nome: Optional[str] = None       # PRO_GRUPO (busca/cria por nome)
+    grupo_codigo: Optional[int] = None     # PRO_GRUPO (codigo direto)
+    secao_nome: Optional[str] = None       # PRO_SECAO (busca/cria por nome)
+    secao_codigo: Optional[int] = None     # PRO_SECAO (codigo direto)
+    marca_nome: Optional[str] = None       # PRO_MARCA (busca/cria por nome)
+    marca_codigo: Optional[int] = None     # PRO_MARCA (codigo direto)
     # Campos da tabela ESTOQUE
     preco_venda: Optional[float] = None    # EST_VENDA
     margem: Optional[float] = None         # EST_MARGEM
@@ -185,6 +188,25 @@ def baixar_os(numero_os: str, body: OSRequest, bg: BackgroundTasks):
 
 # ─── Atualização de cadastro de produto no Enfoque ────────────
 
+
+
+# ─── Helper: busca ou cria registro auxiliar (GRUPO/SECAO/MARCA) ─────────────
+
+def _get_or_create(cur, tabela, campo_id, campo_nome, gerador, nome: str) -> int:
+    """Busca registro pelo nome (case-insensitive). Cria se nao existir. Retorna ID."""
+    nome_enc = nome.strip().encode("cp1252", errors="replace")
+    cur.execute(f"SELECT {campo_id} FROM {tabela} WHERE UPPER({campo_nome}) = UPPER(?)", [nome_enc])
+    row = cur.fetchone()
+    if row:
+        return row[0]
+    cur.execute(f"SELECT GEN_ID({gerador}, 1) FROM RDB$DATABASE")
+    new_id = cur.fetchone()[0]
+    cur.execute(
+        f"INSERT INTO {tabela} ({campo_id}, {campo_nome}, {tabela[:3]}_DATAALTERACAO) VALUES (?, ?, ?)",
+        [new_id, nome_enc, datetime.now()]
+    )
+    return new_id
+
 @app.put("/produto/{codigo}")
 def atualizar_produto(codigo: int, dados: ProdutoAtualizar):
     """
@@ -237,19 +259,34 @@ def atualizar_produto(codigo: int, dados: ProdutoAtualizar):
             valores_p.append(memo.encode("cp1252", errors="replace"))
             atualizados.append("memo")
 
-        if dados.grupo_codigo is not None:
+        grupo_id = None
+        if dados.grupo_nome is not None:
+            grupo_id = _get_or_create(cur, "GRUPO", "GRU_CODIGO", "GRU_NOME", "GRUPO", dados.grupo_nome)
+        elif dados.grupo_codigo is not None:
+            grupo_id = dados.grupo_codigo
+        if grupo_id is not None:
             campos_p.append("PRO_GRUPO = ?")
-            valores_p.append(dados.grupo_codigo)
+            valores_p.append(grupo_id)
             atualizados.append("grupo")
 
-        if dados.secao_codigo is not None:
+        secao_id = None
+        if dados.secao_nome is not None:
+            secao_id = _get_or_create(cur, "SECAO", "SEC_CODIGO", "SEC_NOME", "SECAO", dados.secao_nome)
+        elif dados.secao_codigo is not None:
+            secao_id = dados.secao_codigo
+        if secao_id is not None:
             campos_p.append("PRO_SECAO = ?")
-            valores_p.append(dados.secao_codigo)
+            valores_p.append(secao_id)
             atualizados.append("secao")
 
-        if dados.marca_codigo is not None:
+        marca_id = None
+        if dados.marca_nome is not None:
+            marca_id = _get_or_create(cur, "MARCA", "MAR_CODIGO", "MAR_NOME", "MARCA", dados.marca_nome)
+        elif dados.marca_codigo is not None:
+            marca_id = dados.marca_codigo
+        if marca_id is not None:
             campos_p.append("PRO_MARCA = ?")
-            valores_p.append(dados.marca_codigo)
+            valores_p.append(marca_id)
             atualizados.append("marca")
 
         if campos_p:
