@@ -93,7 +93,7 @@ def puxar_enfoque(delta_desde=None, codigo=None) -> int:
     for row in cur:
         produtos.append({
             "codigo":         row[0],
-            "nome":           row[1] or "",
+            "nome":           (row[1] or "").replace(" (BRIDGE)", "").strip(),
             "cod_fabricante": row[2] or "",
             "cod_barras":     row[3] or "",
             "localizacao":    row[4] or "",
