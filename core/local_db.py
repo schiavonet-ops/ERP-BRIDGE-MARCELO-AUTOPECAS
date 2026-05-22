@@ -190,34 +190,54 @@ def get_produto(codigo: int) -> dict | None:
     return dict(row) if row else None
 
 def buscar_produtos(texto: str, limit: int = 100) -> list[dict]:
-    """Busca em TODOS os campos relevantes — nome, código, aplicação, conversão, marca, grupo, NCM, localização."""
+    """
+    Busca em TODOS os campos — nome, código, fabricante, aplicação, conversão, marca, etc.
+    Suporta múltiplas palavras (AND): "tampa mb" encontra produtos com "tampa" E "mb" em qualquer campo.
+    """
+    palavras = [p.strip() for p in texto.replace("-", " ").split() if p.strip()]
+    if not palavras:
+        return []
+
     con = get_con()
-    like = f"%{texto}%"
-    rows = con.execute("""
+    condicoes = []
+    params = []
+
+    for palavra in palavras:
+        like = f"%{palavra}%"
+        condicoes.append("""(
+            nome              LIKE ? OR
+            cod_fabricante    LIKE ? OR
+            cod_barras         =   ? OR
+            cod_barras2       LIKE ? OR
+            localizacao       LIKE ? OR
+            aplicacao         LIKE ? OR
+            conversao         LIKE ? OR
+            marca_nome        LIKE ? OR
+            grupo_nome        LIKE ? OR
+            subgrupo_nome     LIKE ? OR
+            ncm               LIKE ? OR
+            CAST(codigo AS TEXT) LIKE ?
+        )""")
+        params.extend([like, like, palavra, like, like, like, like, like, like, like, like, like])
+
+    where_clause = " AND ".join(condicoes)
+
+    # Parâmetros de ordenação: código exato primeiro, depois nome
+    rows = con.execute(f"""
         SELECT * FROM produto
-        WHERE nome           LIKE ?1
-           OR cod_fabricante LIKE ?1
-           OR cod_barras      =   ?2
-           OR cod_barras2    LIKE ?1
-           OR localizacao    LIKE ?1
-           OR aplicacao      LIKE ?1
-           OR conversao      LIKE ?1
-           OR marca_nome     LIKE ?1
-           OR grupo_nome     LIKE ?1
-           OR subgrupo_nome  LIKE ?1
-           OR ncm            LIKE ?1
+        WHERE {where_clause}
         ORDER BY
             CASE
-                WHEN nome           LIKE ?2 THEN 0
-                WHEN cod_fabricante  =   ?2 THEN 1
-                WHEN cod_barras      =   ?2 THEN 2
-                WHEN cod_barras2     =   ?2 THEN 3
-                WHEN nome           LIKE ?1 THEN 4
-                ELSE 5
+                WHEN CAST(codigo AS TEXT) = ?  THEN 0
+                WHEN cod_fabricante        = ?  THEN 1
+                WHEN cod_barras            = ?  THEN 2
+                WHEN nome                 LIKE ? THEN 3
+                ELSE 4
             END,
             nome
-        LIMIT ?3
-    """, (like, texto, limit)).fetchall()
+        LIMIT ?
+    """, params + [texto, texto, texto, f"%{texto}%", limit]).fetchall()
+
     con.close()
     return [dict(r) for r in rows]
 
