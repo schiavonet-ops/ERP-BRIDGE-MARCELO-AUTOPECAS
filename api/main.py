@@ -340,6 +340,13 @@ def atualizar_produto(codigo: int, dados: ProdutoAtualizar):
             raise HTTPException(400, "Nenhum campo informado")
 
         con.commit()
+
+        # Atualiza local DB imediatamente (sem esperar o cron de 15min)
+        try:
+            puxar_enfoque(codigo=codigo)
+        except Exception:
+            pass  # Nao falha o request se sync local falhar
+
         return {"ok": True, "codigo": codigo, "atualizados": atualizados}
 
     except HTTPException:
