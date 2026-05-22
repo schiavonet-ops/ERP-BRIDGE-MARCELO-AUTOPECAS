@@ -68,8 +68,8 @@ def puxar_enfoque(delta_desde=None) -> int:
             p.PRO_CODPROPRIO,
             p.PRO_CODBARRA,
             p.PRO_LOCALIZACAO,
-            COALESCE(inv.PRO_QTDE, 0)      AS ESTOQUE,
-            COALESCE(inv.PRO_CUSTOUNI, 0)  AS CUSTO_UNI,
+            COALESCE(e.EST_QTDE, 0) AS ESTOQUE,
+            COALESCE(e.EST_CUSTO, 0) AS CUSTO_UNI,
             p.PRO_MARCA,
             p.PRO_GRUPO,
             p.PRO_DATAALTERACAO,
@@ -78,11 +78,7 @@ def puxar_enfoque(delta_desde=None) -> int:
             p.PRO_CODBARRA2,
             p.PRO_SECAO
         FROM PRODUTO p
-        LEFT JOIN (
-            SELECT PRO_PRODUTO, SUM(PRO_QTDE) AS PRO_QTDE, MAX(PRO_CUSTOUNI) AS PRO_CUSTOUNI
-            FROM PRODUTOINVENTARIO
-            GROUP BY PRO_PRODUTO
-        ) inv ON inv.PRO_PRODUTO = p.PRO_CODIGO
+        LEFT JOIN ESTOQUE e ON e.EST_PRODUTO = p.PRO_CODIGO
         WHERE p.PRO_ISATIVO = 1
           AND p.PRO_ISMERCADORIA = 1
           AND p.PRO_DATAEXCLUSAO IS NULL
