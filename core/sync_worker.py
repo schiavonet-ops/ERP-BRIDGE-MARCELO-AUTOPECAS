@@ -263,7 +263,14 @@ if __name__ == "__main__":
     elif cmd == "delta":
         from core.local_db import status_sync
         s = status_sync()
-        puxar_enfoque(delta_desde=s.get("ultima_sync"))
+        from datetime import datetime, timedelta
+        ultima = s.get("ultima_sync")
+        if ultima:
+            if isinstance(ultima, str):
+                ultima = datetime.fromisoformat(ultima)
+            # Enfoque usa BRT (UTC-3); VPS usa UTC: ajusta fuso
+            ultima = ultima - timedelta(hours=3)
+        puxar_enfoque(delta_desde=ultima)
         enviar_fila()
     elif cmd == "fila":
         enviar_fila()
