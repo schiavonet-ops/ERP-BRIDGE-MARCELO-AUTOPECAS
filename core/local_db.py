@@ -38,11 +38,10 @@ def inicializar():
         CREATE INDEX IF NOT EXISTS idx_produto_nome ON produto(nome);
         CREATE INDEX IF NOT EXISTS idx_produto_cod  ON produto(cod_fabricante);
 
-        -- Fila de alterações pendentes para o Enfoque
         CREATE TABLE IF NOT EXISTS sync_queue (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             codigo_produto  INTEGER NOT NULL,
-            operacao        TEXT NOT NULL,  -- 'baixar' | 'entrada' | 'ajustar'
+            operacao        TEXT NOT NULL,
             quantidade      REAL NOT NULL,
             referencia      TEXT,
             origem          TEXT,
@@ -61,6 +60,54 @@ def inicializar():
     """)
     con.commit()
     con.close()
+    _migrar_colunas()
+
+def _migrar_colunas():
+    """Adiciona colunas novas sem quebrar dados existentes."""
+    con = get_con()
+    cur = con.cursor()
+
+    cur.execute("PRAGMA table_info(produto)")
+    existentes = {row[1] for row in cur.fetchall()}
+
+    novas = [
+        ("aplicacao",     "TEXT DEFAULT ''"),
+        ("conversao",     "TEXT DEFAULT ''"),
+        ("subgrupo",      "TEXT DEFAULT ''"),
+        ("ncm",           "TEXT DEFAULT ''"),
+        ("cod_barras2",   "TEXT DEFAULT ''"),
+        ("preco_venda",   "REAL DEFAULT 0"),
+        ("margem",        "REAL DEFAULT 0"),
+        ("perc_fixo",     "REAL DEFAULT 0"),
+        ("perc_imposto",  "REAL DEFAULT 0"),
+        ("perc_comissao", "REAL DEFAULT 0"),
+        ("perc_outros",   "REAL DEFAULT 0"),
+        ("custo",         "REAL DEFAULT 0"),
+        ("custo_medio",   "REAL DEFAULT 0"),
+        ("marca_nome",    "TEXT DEFAULT ''"),
+        ("grupo_nome",    "TEXT DEFAULT ''"),
+        ("subgrupo_nome", "TEXT DEFAULT ''"),
+    ]
+
+    for nome_col, definicao in novas:
+        if nome_col not in existentes:
+            cur.execute(f"ALTER TABLE produto ADD COLUMN {nome_col} {definicao}")
+
+    # Índices para busca rápida em todos os campos
+    indices = [
+        ("idx_produto_aplicacao",     "aplicacao"),
+        ("idx_produto_conversao",     "conversao"),
+        ("idx_produto_marca_nome",    "marca_nome"),
+        ("idx_produto_grupo_nome",    "grupo_nome"),
+        ("idx_produto_ncm",           "ncm"),
+        ("idx_produto_cod_barras2",   "cod_barras2"),
+        ("idx_produto_localizacao",   "localizacao"),
+    ]
+    for idx_nome, campo in indices:
+        cur.execute(f"CREATE INDEX IF NOT EXISTS {idx_nome} ON produto({campo})")
+
+    con.commit()
+    con.close()
 
 # ─── Produtos ────────────────────────────────────────────────
 
@@ -69,12 +116,21 @@ def upsert_produtos(produtos: list[dict]):
     con = get_con()
     agora = datetime.now().isoformat()
     con.executemany("""
-        INSERT INTO produto
-            (codigo, nome, cod_fabricante, cod_barras, localizacao,
-             estoque, estoque_min, marca, grupo, memo, ultima_sync)
-        VALUES
-            (:codigo, :nome, :cod_fabricante, :cod_barras, :localizacao,
-             :estoque, :estoque_min, :marca, :grupo, :memo, :ultima_sync)
+        INSERT INTO produto (
+            codigo, nome, cod_fabricante, cod_barras, localizacao,
+            estoque, estoque_min, marca, grupo, memo, ultima_sync,
+            aplicacao, conversao, subgrupo, ncm, cod_barras2,
+            preco_venda, margem, perc_fixo, perc_imposto, perc_comissao,
+            perc_outros, custo, custo_medio,
+            marca_nome, grupo_nome, subgrupo_nome
+        ) VALUES (
+            :codigo, :nome, :cod_fabricante, :cod_barras, :localizacao,
+            :estoque, :estoque_min, :marca, :grupo, :memo, :ultima_sync,
+            :aplicacao, :conversao, :subgrupo, :ncm, :cod_barras2,
+            :preco_venda, :margem, :perc_fixo, :perc_imposto, :perc_comissao,
+            :perc_outros, :custo, :custo_medio,
+            :marca_nome, :grupo_nome, :subgrupo_nome
+        )
         ON CONFLICT(codigo) DO UPDATE SET
             nome           = excluded.nome,
             cod_fabricante = excluded.cod_fabricante,
@@ -85,8 +141,43 @@ def upsert_produtos(produtos: list[dict]):
             marca          = excluded.marca,
             grupo          = excluded.grupo,
             memo           = excluded.memo,
-            ultima_sync    = excluded.ultima_sync
-    """, [{**p, "ultima_sync": agora} for p in produtos])
+            ultima_sync    = excluded.ultima_sync,
+            aplicacao      = excluded.aplicacao,
+            conversao      = excluded.conversao,
+            subgrupo       = excluded.subgrupo,
+            ncm            = excluded.ncm,
+            cod_barras2    = excluded.cod_barras2,
+            preco_venda    = excluded.preco_venda,
+            margem         = excluded.margem,
+            perc_fixo      = excluded.perc_fixo,
+            perc_imposto   = excluded.perc_imposto,
+            perc_comissao  = excluded.perc_comissao,
+            perc_outros    = excluded.perc_outros,
+            custo          = excluded.custo,
+            custo_medio    = excluded.custo_medio,
+            marca_nome     = excluded.marca_nome,
+            grupo_nome     = excluded.grupo_nome,
+            subgrupo_nome  = excluded.subgrupo_nome
+    """, [{
+        **p,
+        "ultima_sync":    agora,
+        "aplicacao":      p.get("aplicacao", ""),
+        "conversao":      p.get("conversao", ""),
+        "subgrupo":       p.get("subgrupo", ""),
+        "ncm":            p.get("ncm", ""),
+        "cod_barras2":    p.get("cod_barras2", ""),
+        "preco_venda":    p.get("preco_venda", 0),
+        "margem":         p.get("margem", 0),
+        "perc_fixo":      p.get("perc_fixo", 0),
+        "perc_imposto":   p.get("perc_imposto", 0),
+        "perc_comissao":  p.get("perc_comissao", 0),
+        "perc_outros":    p.get("perc_outros", 0),
+        "custo":          p.get("custo", 0),
+        "custo_medio":    p.get("custo_medio", 0),
+        "marca_nome":     p.get("marca_nome", ""),
+        "grupo_nome":     p.get("grupo_nome", ""),
+        "subgrupo_nome":  p.get("subgrupo_nome", ""),
+    } for p in produtos])
     con.commit()
     con.close()
 
@@ -98,13 +189,35 @@ def get_produto(codigo: int) -> dict | None:
     con.close()
     return dict(row) if row else None
 
-def buscar_produtos(texto: str, limit: int = 30) -> list[dict]:
+def buscar_produtos(texto: str, limit: int = 100) -> list[dict]:
+    """Busca em TODOS os campos relevantes — nome, código, aplicação, conversão, marca, grupo, NCM, localização."""
     con = get_con()
+    like = f"%{texto}%"
     rows = con.execute("""
         SELECT * FROM produto
-        WHERE nome LIKE ? OR cod_fabricante LIKE ? OR cod_barras = ?
-        ORDER BY nome LIMIT ?
-    """, (f"%{texto}%", f"%{texto}%", texto, limit)).fetchall()
+        WHERE nome           LIKE ?1
+           OR cod_fabricante LIKE ?1
+           OR cod_barras      =   ?2
+           OR cod_barras2    LIKE ?1
+           OR localizacao    LIKE ?1
+           OR aplicacao      LIKE ?1
+           OR conversao      LIKE ?1
+           OR marca_nome     LIKE ?1
+           OR grupo_nome     LIKE ?1
+           OR subgrupo_nome  LIKE ?1
+           OR ncm            LIKE ?1
+        ORDER BY
+            CASE
+                WHEN nome           LIKE ?2 THEN 0
+                WHEN cod_fabricante  =   ?2 THEN 1
+                WHEN cod_barras      =   ?2 THEN 2
+                WHEN cod_barras2     =   ?2 THEN 3
+                WHEN nome           LIKE ?1 THEN 4
+                ELSE 5
+            END,
+            nome
+        LIMIT ?3
+    """, (like, texto, limit)).fetchall()
     con.close()
     return [dict(r) for r in rows]
 
@@ -136,10 +249,6 @@ def total_produtos() -> dict:
 # ─── Movimentações locais ─────────────────────────────────────
 
 def aplicar_movimentacao_local(codigo: int, quantidade: float, operacao: str) -> dict:
-    """
-    Aplica movimentação no banco local imediatamente.
-    Depois o sync_worker envia para o Enfoque.
-    """
     con = get_con()
     row = con.execute(
         "SELECT estoque, nome FROM produto WHERE codigo = ?", (codigo,)
