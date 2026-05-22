@@ -44,7 +44,7 @@ def enfoque_online() -> bool:
     except Exception:
         return False
 
-def puxar_enfoque(delta_desde=None) -> int:
+def puxar_enfoque(delta_desde=None, codigo=None) -> int:
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Conectando ao Enfoque...")
     try:
         con = _conectar()
@@ -57,7 +57,10 @@ def puxar_enfoque(delta_desde=None) -> int:
 
     filtro = ""
     params = []
-    if delta_desde:
+    if codigo is not None:
+        filtro = "AND p.PRO_CODIGO = ?"
+        params.append(codigo)
+    elif delta_desde:
         filtro = "AND p.PRO_DATAALTERACAO >= ?"
         params.append(delta_desde)
 
