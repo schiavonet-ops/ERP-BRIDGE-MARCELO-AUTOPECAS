@@ -239,8 +239,6 @@ def atualizar_produto(codigo: int, dados: ProdutoAtualizar):
 
         if dados.descricao is not None:
             nome = dados.descricao.strip()
-            if "(BRIDGE)" not in nome:
-                nome = f"{nome} (BRIDGE)"
             campos_p.append("PRO_NOME = ?")
             valores_p.append(nome[:120].encode("cp1252", errors="replace"))
             atualizados.append("descricao")
