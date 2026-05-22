@@ -64,6 +64,8 @@ class ProdutoAtualizar(BaseModel):
     marca_nome: Optional[str] = None       # PRO_MARCA (busca/cria por nome)
     marca_codigo: Optional[int] = None     # PRO_MARCA (codigo direto)
     # Campos da tabela ESTOQUE
+    preco_sem_lucro: Optional[float] = None  # EST_VENDACUSTO
+    preco_sugerido: Optional[float] = None   # EST_VENDASUGERIDO
     preco_venda: Optional[float] = None    # EST_VENDA
     margem: Optional[float] = None         # EST_MARGEM
     perc_comissao: Optional[float] = None  # EST_PERCCOMISSAO
@@ -299,6 +301,16 @@ def atualizar_produto(codigo: int, dados: ProdutoAtualizar):
         # ─── UPDATE em ESTOQUE ───
         campos_e, valores_e = [], []
 
+        if dados.preco_sem_lucro is not None:
+            campos_e.append("EST_VENDACUSTO = ?")
+            valores_e.append(dados.preco_sem_lucro)
+            atualizados.append("preco_sem_lucro")
+
+        if dados.preco_sugerido is not None:
+            campos_e.append("EST_VENDASUGERIDO = ?")
+            valores_e.append(dados.preco_sugerido)
+            atualizados.append("preco_sugerido")
+
         if dados.preco_venda is not None:
             campos_e.append("EST_VENDA = ?")
             valores_e.append(dados.preco_venda)
@@ -482,6 +494,51 @@ def produto_completo(codigo: int):
         raise
     except Exception as e:
         raise HTTPException(500, f"Erro: {e}")
+    finally:
+        con.close()
+
+
+# ─── Listagens auxiliares (Grupo / Secao / Marca) ─────────────────────────────
+
+@app.get("/grupos")
+def listar_grupos():
+    """Lista todos os grupos cadastrados no Enfoque."""
+    con = _conectar()
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT GRU_CODIGO, GRU_NOME FROM GRUPO ORDER BY GRU_NOME")
+        def s(v):
+            if isinstance(v, bytes): return v.decode("cp1252", errors="replace").strip()
+            return str(v).strip() if v else ""
+        return [{"codigo": r[0], "nome": s(r[1])} for r in cur.fetchall()]
+    finally:
+        con.close()
+
+@app.get("/secoes")
+def listar_secoes():
+    """Lista todas as secoes (subgrupos) cadastradas no Enfoque."""
+    con = _conectar()
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT SEC_CODIGO, SEC_NOME FROM SECAO ORDER BY SEC_NOME")
+        def s(v):
+            if isinstance(v, bytes): return v.decode("cp1252", errors="replace").strip()
+            return str(v).strip() if v else ""
+        return [{"codigo": r[0], "nome": s(r[1])} for r in cur.fetchall()]
+    finally:
+        con.close()
+
+@app.get("/marcas")
+def listar_marcas():
+    """Lista todas as marcas cadastradas no Enfoque."""
+    con = _conectar()
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT MAR_CODIGO, MAR_NOME FROM MARCA ORDER BY MAR_NOME")
+        def s(v):
+            if isinstance(v, bytes): return v.decode("cp1252", errors="replace").strip()
+            return str(v).strip() if v else ""
+        return [{"codigo": r[0], "nome": s(r[1])} for r in cur.fetchall()]
     finally:
         con.close()
 
