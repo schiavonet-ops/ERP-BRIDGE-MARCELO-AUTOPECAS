@@ -350,6 +350,134 @@ def atualizar_produto(codigo: int, dados: ProdutoAtualizar):
     finally:
         con.close()
 
+
+# ─── Parser de memo: separa APLICACAO e CONVERSAO ─────────────────────────────
+
+def _parse_memo(memo_raw: str) -> tuple:
+    """Separa PRO_MEMO em (aplicacao, conversao)."""
+    if not memo_raw or not memo_raw.strip():
+        return "", ""
+    
+    # Formato modelo B
+    if "-------CONVERSAO-----------" in memo_raw:
+        parts = memo_raw.split("-------CONVERSAO-----------", 1)
+        aplicacao = parts[0].replace("-------APLICACAO-----------", "").strip()
+        conversao = parts[1].strip()
+        return aplicacao, conversao
+    
+    # Formato antigo com separador de traços
+    import re
+    match = re.search(r"-{4,}", memo_raw)
+    if match:
+        before = memo_raw[:match.start()].strip()
+        after = memo_raw[match.end():].strip()
+        if before and after:
+            return before, after
+    
+    # Heuristica: linhas com espaco duplo + letra + numero = conversao
+    lines = memo_raw.strip().splitlines()
+    ap, co = [], []
+    modo = "ap"
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+        if modo == "ap" and "  " in line and any(c.isalpha() for c in s) and any(c.isdigit() for c in s):
+            modo = "co"
+        if modo == "co":
+            co.append(s)
+        else:
+            ap.append(s)
+    return "\n".join(ap), "\n".join(co)
+
+
+# ─── Dados completos do produto para formulario de edicao ─────────────────────
+
+@app.get("/produto/{codigo}/completo")
+def produto_completo(codigo: int):
+    """Retorna dados completos: nomes de grupo/secao/marca, memo parseado, todos os precos."""
+    con = _conectar()
+    try:
+        cur = con.cursor()
+        cur.execute("""
+            SELECT
+                p.PRO_CODIGO, p.PRO_NOME, p.PRO_CODPROPRIO, p.PRO_CODBARRA,
+                p.PRO_LOCALIZACAO, p.PRO_GRUPO, p.PRO_SECAO, p.PRO_MARCA,
+                CAST(SUBSTRING(p.PRO_MEMO FROM 1 FOR 8000) AS VARCHAR(8000)),
+                p.PRO_NCM, p.PRO_CODBARRA2,
+                COALESCE(e.EST_VENDA, 0), COALESCE(e.EST_VENDASUGERIDO, 0),
+                COALESCE(e.EST_CUSTO, 0), COALESCE(e.EST_CUSTOMEDIO, 0),
+                COALESCE(e.EST_MARGEM, 0), COALESCE(e.EST_PERCFIXO, 0),
+                COALESCE(e.EST_PERCIMPOSTO, 0), COALESCE(e.EST_PERCCOMISSAO, 0),
+                COALESCE(e.EST_PERCOUTROS, 0), COALESCE(e.EST_DESCONTOMAX, 0),
+                COALESCE(e.EST_QTDE, 0), COALESCE(e.EST_MINIMO, 0)
+            FROM PRODUTO p
+            LEFT JOIN ESTOQUE e ON e.EST_PRODUTO = p.PRO_CODIGO
+            WHERE p.PRO_CODIGO = ?
+        """, [codigo])
+
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(404, f"Produto {codigo} nao encontrado")
+
+        def s(v):
+            if v is None: return ""
+            if isinstance(v, bytes): return v.decode("cp1252", errors="replace").strip()
+            return str(v).strip()
+
+        def f(v):
+            try: return float(v or 0)
+            except: return 0.0
+
+        def nome_aux(tabela, fid, fnome, cod):
+            if not cod: return ""
+            cur.execute(f"SELECT {fnome} FROM {tabela} WHERE {fid} = ?", [cod])
+            r = cur.fetchone()
+            if not r: return ""
+            v = r[0]
+            if isinstance(v, bytes): return v.decode("cp1252", errors="replace").strip()
+            return str(v).strip()
+
+        memo_raw = s(row[8])
+        aplicacao, conversao = _parse_memo(memo_raw)
+
+        return {
+            "codigo":         row[0],
+            "descricao":      s(row[1]),
+            "codigo_proprio": s(row[2]),
+            "cod_barras":     s(row[3]),
+            "localizacao":    s(row[4]),
+            "grupo_codigo":   row[5],
+            "grupo_nome":     nome_aux("GRUPO","GRU_CODIGO","GRU_NOME", row[5]),
+            "secao_codigo":   row[6],
+            "secao_nome":     nome_aux("SECAO","SEC_CODIGO","SEC_NOME", row[6]),
+            "marca_codigo":   row[7],
+            "marca_nome":     nome_aux("MARCA","MAR_CODIGO","MAR_NOME", row[7]),
+            "aplicacao":      aplicacao,
+            "conversao":      conversao,
+            "memo_raw":       memo_raw,
+            "ncm":            s(row[9]),
+            "cod_barras2":    s(row[10]),
+            "preco_venda":    f(row[11]),
+            "preco_sugerido": f(row[12]),
+            "custo":          f(row[13]),
+            "custo_medio":    f(row[14]),
+            "margem":         f(row[15]),
+            "perc_fixo":      f(row[16]),
+            "perc_imposto":   f(row[17]),
+            "perc_comissao":  f(row[18]),
+            "perc_outros":    f(row[19]),
+            "desconto_max":   f(row[20]),
+            "estoque_atual":  f(row[21]),
+            "estoque_minimo": f(row[22]),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Erro: {e}")
+    finally:
+        con.close()
+
 # ─── Rotas de administração ────────────────────────────────────
 
 @app.post("/sync/puxar")
