@@ -44,6 +44,34 @@ def enfoque_online() -> bool:
     except Exception:
         return False
 
+
+def _parse_memo_local(memo_raw: str):
+    """Separa PRO_MEMO em (aplicacao, conversao)."""
+    if not memo_raw or not memo_raw.strip():
+        return "", ""
+    if "-------CONVERSAO-----------" in memo_raw:
+        parts = memo_raw.split("-------CONVERSAO-----------", 1)
+        ap = parts[0].replace("-------APLICACAO-----------", "").strip()
+        co = parts[1].strip()
+        return ap, co
+    import re
+    match = re.search(r"-{4,}", memo_raw)
+    if match:
+        before = memo_raw[:match.start()].strip()
+        after  = memo_raw[match.end():].strip()
+        if before and after:
+            return before, after
+    lines = memo_raw.strip().splitlines()
+    ap, co = [], []
+    modo = "ap"
+    for line in lines:
+        s = line.strip()
+        if not s: continue
+        if modo == "ap" and "  " in line and any(c.isalpha() for c in s) and any(c.isdigit() for c in s):
+            modo = "co"
+        (co if modo == "co" else ap).append(s)
+    return "\n".join(ap), "\n".join(co)
+
 def puxar_enfoque(delta_desde=None, codigo=None) -> int:
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Conectando ao Enfoque...")
     try:
@@ -64,6 +92,19 @@ def puxar_enfoque(delta_desde=None, codigo=None) -> int:
         filtro = "AND p.PRO_DATAALTERACAO >= ?"
         params.append(delta_desde)
 
+    # Carrega tabelas auxiliares para resolução de nomes
+    def _s(v):
+        if v is None: return ""
+        if isinstance(v, bytes): return v.decode("cp1252", errors="replace").strip()
+        return str(v).strip()
+
+    cur.execute("SELECT GRU_CODIGO, GRU_NOME FROM GRUPO")
+    grupos = {r[0]: _s(r[1]) for r in cur.fetchall()}
+    cur.execute("SELECT SEC_CODIGO, SEC_NOME FROM SECAO")
+    secoes = {r[0]: _s(r[1]) for r in cur.fetchall()}
+    cur.execute("SELECT MAR_CODIGO, MAR_NOME FROM MARCA")
+    marcas = {r[0]: _s(r[1]) for r in cur.fetchall()}
+
     cur.execute(f"""
         SELECT
             p.PRO_CODIGO,
@@ -71,15 +112,22 @@ def puxar_enfoque(delta_desde=None, codigo=None) -> int:
             p.PRO_CODPROPRIO,
             p.PRO_CODBARRA,
             p.PRO_LOCALIZACAO,
-            COALESCE(e.EST_QTDE, 0) AS ESTOQUE,
-            COALESCE(e.EST_CUSTO, 0) AS CUSTO_UNI,
+            COALESCE(e.EST_QTDE, 0)        AS ESTOQUE,
+            COALESCE(e.EST_CUSTO, 0)       AS CUSTO,
             p.PRO_MARCA,
             p.PRO_GRUPO,
             p.PRO_DATAALTERACAO,
             CAST(SUBSTRING(p.PRO_MEMO FROM 1 FOR 8000) AS VARCHAR(8000)) AS PRO_MEMO,
             p.PRO_NCM,
             p.PRO_CODBARRA2,
-            p.PRO_SECAO
+            p.PRO_SECAO,
+            COALESCE(e.EST_VENDA, 0)       AS PRECO_VENDA,
+            COALESCE(e.EST_MARGEM, 0)      AS MARGEM,
+            COALESCE(e.EST_PERCFIXO, 0)    AS PERC_FIXO,
+            COALESCE(e.EST_PERCIMPOSTO, 0) AS PERC_IMPOSTO,
+            COALESCE(e.EST_PERCCOMISSAO,0) AS PERC_COMISSAO,
+            COALESCE(e.EST_PERCOUTROS, 0)  AS PERC_OUTROS,
+            COALESCE(e.EST_CUSTOMEDIO, 0)  AS CUSTO_MEDIO
         FROM PRODUTO p
         LEFT JOIN ESTOQUE e ON e.EST_PRODUTO = p.PRO_CODIGO
         WHERE p.PRO_ISATIVO = 1
@@ -91,6 +139,11 @@ def puxar_enfoque(delta_desde=None, codigo=None) -> int:
 
     produtos = []
     for row in cur:
+        memo_raw     = str(row[10] or "")
+        aplicacao, conversao = _parse_memo_local(memo_raw)
+        marca_cod    = row[7]
+        grupo_cod    = row[8]
+        subgrupo_cod = row[13]
         produtos.append({
             "codigo":         row[0],
             "nome":           (row[1] or "").replace(" (BRIDGE)", "").strip(),
@@ -99,12 +152,25 @@ def puxar_enfoque(delta_desde=None, codigo=None) -> int:
             "localizacao":    row[4] or "",
             "estoque":        float(row[5] or 0),
             "estoque_min":    0.0,
-            "marca":          str(row[7] or ""),
-            "grupo":          str(row[8] or ""),
-            "memo":           str(row[10] or ""),
+            "marca":          str(marca_cod or ""),
+            "grupo":          str(grupo_cod or ""),
+            "memo":           memo_raw,
             "ncm":            str(row[11] or ""),
             "cod_barras2":    str(row[12] or ""),
-            "subgrupo":       str(row[13] or ""),
+            "subgrupo":       str(subgrupo_cod or ""),
+            "aplicacao":      aplicacao,
+            "conversao":      conversao,
+            "preco_venda":    float(row[14] or 0),
+            "margem":         float(row[15] or 0),
+            "perc_fixo":      float(row[16] or 0),
+            "perc_imposto":   float(row[17] or 0),
+            "perc_comissao":  float(row[18] or 0),
+            "perc_outros":    float(row[19] or 0),
+            "custo":          float(row[6] or 0),
+            "custo_medio":    float(row[20] or 0),
+            "marca_nome":     marcas.get(marca_cod, ""),
+            "grupo_nome":     grupos.get(grupo_cod, ""),
+            "subgrupo_nome":  secoes.get(subgrupo_cod, ""),
         })
     con.close()
 
