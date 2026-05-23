@@ -6,7 +6,7 @@ Rodar:     uvicorn api.main:app --host 0.0.0.0 --port 8000
 Docs:      http://localhost:8000/docs
 """
 
-import sys, os, threading
+import sys, os, re, threading
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
@@ -82,16 +82,31 @@ def _try_sync():
 # ─── Helper: monta PRO_MEMO no formato modelo B ────────────────
 
 def _montar_memo(aplicacao: Optional[str], conversao: Optional[str]) -> str:
-    """Concatena APLICACAO + CONVERSAO no formato modelo B."""
+    """
+    Monta PRO_MEMO no formato modelo B.
+    CORRIGIDO: remove delimitadores duplicados antes de montar,
+    evitando que o conteudo ja venha com os cabecalhos incluidos.
+    """
+    # Limpa delimitadores que possam vir junto com o conteudo
+    if aplicacao:
+        aplicacao = re.sub(r'^-+\s*APLICACAO\s*-+\s*\n?', '', aplicacao, flags=re.MULTILINE)
+        aplicacao = re.sub(r'^-+\s*\n?', '', aplicacao, flags=re.MULTILINE)
+        aplicacao = aplicacao.strip()
+
+    if conversao:
+        conversao = re.sub(r'^-+\s*CONVERSAO\s*-+\s*\n?', '', conversao, flags=re.MULTILINE)
+        conversao = re.sub(r'^-+\s*\n?', '', conversao, flags=re.MULTILINE)
+        conversao = conversao.strip()
+
     partes = []
-    if aplicacao and aplicacao.strip():
+    if aplicacao:
         partes.append("-------APLICACAO-----------")
-        partes.append(aplicacao.strip())
-    if conversao and conversao.strip():
+        partes.append(aplicacao)
+    if conversao:
         if partes:
-            partes.append("")  # linha em branco entre seções
+            partes.append("")  # linha em branco entre secoes
         partes.append("-------CONVERSAO-----------")
-        partes.append(conversao.strip())
+        partes.append(conversao)
     return "\n".join(partes)
 
 # ─── Rotas de leitura ─────────────────────────────────────────
@@ -137,7 +152,6 @@ def detalhe(codigo: int):
 
 @app.post("/estoque/{codigo}/baixar")
 def baixar(codigo: int, body: MovRequest, bg: BackgroundTasks):
-    """Baixa estoque. Aplica local agora, envia ao Enfoque em background."""
     try:
         resultado = db.aplicar_movimentacao_local(codigo, body.quantidade, "baixar")
         db.enfileirar(codigo, "baixar", body.quantidade, body.referencia, body.origem)
@@ -148,7 +162,6 @@ def baixar(codigo: int, body: MovRequest, bg: BackgroundTasks):
 
 @app.post("/estoque/{codigo}/entrada")
 def entrada(codigo: int, body: MovRequest, bg: BackgroundTasks):
-    """Entrada de estoque."""
     try:
         resultado = db.aplicar_movimentacao_local(codigo, body.quantidade, "entrada")
         db.enfileirar(codigo, "entrada", body.quantidade, body.referencia, body.origem)
@@ -159,7 +172,6 @@ def entrada(codigo: int, body: MovRequest, bg: BackgroundTasks):
 
 @app.post("/estoque/{codigo}/ajustar")
 def ajustar(codigo: int, body: AjusteRequest, bg: BackgroundTasks):
-    """Define estoque para valor exato."""
     try:
         resultado = db.aplicar_movimentacao_local(codigo, body.quantidade_nova, "ajustar")
         db.enfileirar(codigo, "ajustar", body.quantidade_nova, body.referencia)
@@ -170,7 +182,6 @@ def ajustar(codigo: int, body: AjusteRequest, bg: BackgroundTasks):
 
 @app.post("/estoque/os/{numero_os}")
 def baixar_os(numero_os: str, body: OSRequest, bg: BackgroundTasks):
-    """Baixa todos os itens de uma OS de uma vez."""
     resultados, erros = [], []
     for item in body.itens:
         try:
@@ -188,14 +199,9 @@ def baixar_os(numero_os: str, body: OSRequest, bg: BackgroundTasks):
         "erros_detalhe": erros
     }
 
-# ─── Atualização de cadastro de produto no Enfoque ────────────
-
-
-
 # ─── Helper: busca ou cria registro auxiliar (GRUPO/SECAO/MARCA) ─────────────
 
 def _get_or_create(cur, tabela, campo_id, campo_nome, gerador, nome: str) -> int:
-    """Busca registro pelo nome (case-insensitive). Cria se nao existir. Retorna ID."""
     nome_enc = nome.strip().encode("cp1252", errors="replace")
     cur.execute(f"SELECT {campo_id} FROM {tabela} WHERE UPPER({campo_nome}) = UPPER(?)", [nome_enc])
     row = cur.fetchone()
@@ -211,22 +217,10 @@ def _get_or_create(cur, tabela, campo_id, campo_nome, gerador, nome: str) -> int
 
 @app.put("/produto/{codigo}")
 def atualizar_produto(codigo: int, dados: ProdutoAtualizar):
-    """
-    Atualiza cadastro de produto no Enfoque (PRODUTO + ESTOQUE).
-    Todos os campos são opcionais.
-    Adiciona marker '(BRIDGE)' na descrição automaticamente.
-
-    Campos suportados:
-      PRODUTO: descricao, codigo_proprio, localizacao, aplicacao, conversao,
-               grupo_codigo, secao_codigo, marca_codigo
-      ESTOQUE: preco_venda, margem, perc_comissao, perc_imposto,
-               perc_fixo, perc_outros
-    """
     con = _conectar()
     try:
         cur = con.cursor()
 
-        # Verifica se o produto existe
         cur.execute("SELECT 1 FROM PRODUTO WHERE PRO_CODIGO = ?", [codigo])
         if not cur.fetchone():
             raise HTTPException(404, f"Produto {codigo} nao encontrado")
@@ -234,7 +228,6 @@ def atualizar_produto(codigo: int, dados: ProdutoAtualizar):
         atualizados = []
         agora = datetime.now()
 
-        # ─── UPDATE em PRODUTO ───
         campos_p, valores_p = [], []
 
         if dados.descricao is not None:
@@ -254,7 +247,21 @@ def atualizar_produto(codigo: int, dados: ProdutoAtualizar):
             atualizados.append("localizacao")
 
         if dados.aplicacao is not None or dados.conversao is not None:
-            memo = _montar_memo(dados.aplicacao, dados.conversao)
+            # Busca memo atual para preservar o campo que nao foi enviado
+            cur.execute("SELECT CAST(SUBSTRING(PRO_MEMO FROM 1 FOR 8000) AS VARCHAR(8000)) FROM PRODUTO WHERE PRO_CODIGO = ?", [codigo])
+            row_memo = cur.fetchone()
+            memo_atual = ""
+            if row_memo and row_memo[0]:
+                v = row_memo[0]
+                memo_atual = v.decode("cp1252", errors="replace") if isinstance(v, bytes) else str(v)
+
+            # Parse do memo atual para preservar o que nao foi enviado
+            ap_atual, co_atual = _parse_memo(memo_atual)
+
+            ap_final = dados.aplicacao if dados.aplicacao is not None else ap_atual
+            co_final = dados.conversao if dados.conversao is not None else co_atual
+
+            memo = _montar_memo(ap_final, co_final)
             campos_p.append("PRO_MEMO = ?")
             valores_p.append(memo.encode("cp1252", errors="replace"))
             atualizados.append("memo")
@@ -296,7 +303,6 @@ def atualizar_produto(codigo: int, dados: ProdutoAtualizar):
             sql_p = f"UPDATE PRODUTO SET {', '.join(campos_p)} WHERE PRO_CODIGO = ?"
             cur.execute(sql_p, valores_p)
 
-        # ─── UPDATE em ESTOQUE ───
         campos_e, valores_e = [], []
 
         if dados.preco_sem_lucro is not None:
@@ -351,11 +357,10 @@ def atualizar_produto(codigo: int, dados: ProdutoAtualizar):
 
         con.commit()
 
-        # Atualiza local DB imediatamente (sem esperar o cron de 15min)
         try:
             puxar_enfoque(codigo=codigo)
         except Exception:
-            pass  # Nao falha o request se sync local falhar
+            pass
 
         return {"ok": True, "codigo": codigo, "atualizados": atualizados}
 
@@ -374,24 +379,20 @@ def _parse_memo(memo_raw: str) -> tuple:
     """Separa PRO_MEMO em (aplicacao, conversao)."""
     if not memo_raw or not memo_raw.strip():
         return "", ""
-    
-    # Formato modelo B
+
     if "-------CONVERSAO-----------" in memo_raw:
         parts = memo_raw.split("-------CONVERSAO-----------", 1)
         aplicacao = parts[0].replace("-------APLICACAO-----------", "").strip()
         conversao = parts[1].strip()
         return aplicacao, conversao
-    
-    # Formato antigo com separador de traços
-    import re
+
     match = re.search(r"-{4,}", memo_raw)
     if match:
         before = memo_raw[:match.start()].strip()
         after = memo_raw[match.end():].strip()
         if before and after:
             return before, after
-    
-    # Heuristica: linhas com espaco duplo + letra + numero = conversao
+
     lines = memo_raw.strip().splitlines()
     ap, co = [], []
     modo = "ap"
@@ -412,7 +413,6 @@ def _parse_memo(memo_raw: str) -> tuple:
 
 @app.get("/produto/{codigo}/completo")
 def produto_completo(codigo: int):
-    """Retorna dados completos: nomes de grupo/secao/marca, memo parseado, todos os precos."""
     con = _conectar()
     try:
         cur = con.cursor()
@@ -500,7 +500,6 @@ def produto_completo(codigo: int):
 
 @app.get("/grupos")
 def listar_grupos():
-    """Lista todos os grupos cadastrados no Enfoque."""
     con = _conectar()
     try:
         cur = con.cursor()
@@ -514,7 +513,6 @@ def listar_grupos():
 
 @app.get("/secoes")
 def listar_secoes():
-    """Lista todas as secoes (subgrupos) cadastradas no Enfoque."""
     con = _conectar()
     try:
         cur = con.cursor()
@@ -528,7 +526,6 @@ def listar_secoes():
 
 @app.get("/marcas")
 def listar_marcas():
-    """Lista todas as marcas cadastradas no Enfoque."""
     con = _conectar()
     try:
         cur = con.cursor()
@@ -544,7 +541,6 @@ def listar_marcas():
 
 @app.post("/sync/puxar")
 def sync_puxar(completo: bool = Query(False)):
-    """Força sincronização do Enfoque para o banco local."""
     s = db.status_sync()
     delta_desde = None if completo else s.get("ultima_sync")
     n = puxar_enfoque(delta_desde=delta_desde)
@@ -552,7 +548,6 @@ def sync_puxar(completo: bool = Query(False)):
 
 @app.post("/sync/enviar")
 def sync_enviar():
-    """Força envio da fila pendente para o Enfoque."""
     return enviar_fila()
 
 @app.get("/sync/status")
@@ -561,3 +556,11 @@ def sync_status():
         "enfoque_online": enfoque_online(),
         **db.status_sync()
     }
+
+@app.post("/sync/delta")
+def sync_delta():
+    """Força sync delta imediato — usado pelo EPP para atualizar sem esperar o cron."""
+    s = db.status_sync()
+    delta_desde = s.get("ultima_sync")
+    n = puxar_enfoque(delta_desde=delta_desde)
+    return {"sincronizados": n, "modo": "delta"}
