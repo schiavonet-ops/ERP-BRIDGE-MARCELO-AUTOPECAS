@@ -564,3 +564,219 @@ def sync_delta():
     delta_desde = s.get("ultima_sync")
     n = puxar_enfoque(delta_desde=delta_desde)
     return {"sincronizados": n, "modo": "delta"}
+
+
+# ─── Histórico de movimentações do produto ────────────────────────────────────
+
+@app.get("/produto/{codigo}/historico")
+def produto_historico(codigo: int, limit: int = Query(100, le=500)):
+    """
+    Retorna histórico completo de movimentações do produto:
+    vendas, OS, condicionais, entradas, ajustes.
+    """
+    con = _conectar()
+    try:
+        cur = con.cursor()
+
+        def _s(v):
+            if v is None: return ""
+            if isinstance(v, bytes): return v.decode("cp1252", errors="replace").strip()
+            return str(v).strip()
+
+        def _f(v):
+            try: return float(v or 0)
+            except: return 0.0
+
+        # Busca todas as movimentações do produto
+        cur.execute(f"""
+            SELECT FIRST {limit}
+                m.MOV_CODIGO,
+                m.MOV_DATA,
+                m.MOV_HORAEMISSAO,
+                m.MOV_QTDE,
+                m.MOV_ESTOQUE,
+                m.MOV_VALORUNI,
+                m.MOV_VALORTOTAL,
+                m.MOV_ORIGEM,
+                m.MOV_NOTAENTRADA,
+                m.MOV_NOTASAIDA,
+                m.MOV_ORDEMSERVICO,
+                m.MOV_CONDICIONAL,
+                m.MOV_CODPRODUTO
+            FROM MOVESTOQUE m
+            WHERE m.MOV_PRODUTO = ?
+              AND m.MOV_ISEXCLUIDO = 0
+            ORDER BY m.MOV_CODIGO DESC
+        """, [codigo])
+
+        movimentos_raw = cur.fetchall()
+        resultado = []
+
+        for row in movimentos_raw:
+            mov_codigo      = row[0]
+            mov_data        = row[1]
+            mov_hora        = row[2]
+            mov_qtde        = _f(row[3])
+            mov_saldo       = _f(row[4])
+            mov_valor_uni   = _f(row[5])
+            mov_valor_total = _f(row[6])
+            mov_origem      = _s(row[7])
+            not_entrada_id  = row[8]
+            not_saida_id    = row[9]
+            os_id           = row[10]
+            cond_id         = row[11]
+
+            tipo = "Ajuste"
+            documento = ""
+            cliente_nome = ""
+            cliente_codigo = None
+            numero_doc = ""
+            detalhes = {}
+
+            # ── Venda (NOTASAIDA) ──────────────────────────────────────────
+            if not_saida_id:
+                tipo = "Venda"
+                try:
+                    cur.execute("""
+                        SELECT ns.NOT_CODIGO, ns.NOT_NUMERO, ns.NOT_FICHA,
+                               ns.NOT_DATA, ns.NOT_VALORTOTAL,
+                               f.FIC_NOME
+                        FROM NOTASAIDA ns
+                        LEFT JOIN FICHA f ON f.FIC_CODIGO = ns.NOT_FICHA
+                        WHERE ns.NOT_CODIGO = ?
+                    """, [not_saida_id])
+                    r = cur.fetchone()
+                    if r:
+                        numero_doc = _s(r[1]) or str(r[0])
+                        cliente_codigo = r[2]
+                        cliente_nome = _s(r[5])
+                        detalhes = {
+                            "numero_nota": numero_doc,
+                            "valor_total": _f(r[4])
+                        }
+                except Exception:
+                    pass
+
+            # ── Ordem de Serviço ───────────────────────────────────────────
+            elif os_id:
+                tipo = "Ordem de Serviço"
+                try:
+                    cur.execute("""
+                        SELECT o.ORD_CODIGO, o.ORD_FICHA, o.ORD_VEICULO,
+                               o.ORD_STATUS, o.ORD_DATA, o.ORD_QUILOMETRAGEM,
+                               f.FIC_NOME,
+                               v.VEI_PLACA, v.VEI_MODELO
+                        FROM ORDEMSERVICO o
+                        LEFT JOIN FICHA f ON f.FIC_CODIGO = o.ORD_FICHA
+                        LEFT JOIN VEICULO v ON v.VEI_CODIGO = o.ORD_VEICULO
+                        WHERE o.ORD_CODIGO = ?
+                    """, [os_id])
+                    r = cur.fetchone()
+                    if r:
+                        numero_doc = str(r[0])
+                        cliente_codigo = r[1]
+                        cliente_nome = _s(r[6])
+                        detalhes = {
+                            "numero_os": r[0],
+                            "status": r[3],
+                            "quilometragem": r[5],
+                            "veiculo_placa": _s(r[7]),
+                            "veiculo_modelo": _s(r[8])
+                        }
+                except Exception:
+                    pass
+
+            # ── Condicional ────────────────────────────────────────────────
+            elif cond_id:
+                tipo = "Condicional"
+                try:
+                    cur.execute("""
+                        SELECT c.CON_CODIGO, c.CON_FICHA, c.CON_DATA,
+                               c.CON_STATUS, c.CON_TOTAL, c.CON_DATAPREVISTA,
+                               f.FIC_NOME
+                        FROM CONDICIONAL c
+                        LEFT JOIN FICHA f ON f.FIC_CODIGO = c.CON_FICHA
+                        WHERE c.CON_CODIGO = ?
+                    """, [cond_id])
+                    r = cur.fetchone()
+                    if r:
+                        numero_doc = str(r[0])
+                        cliente_codigo = r[1]
+                        cliente_nome = _s(r[6])
+                        detalhes = {
+                            "numero_condicional": r[0],
+                            "status": r[3],
+                            "valor_total": _f(r[4]),
+                            "data_prevista": str(r[5]) if r[5] else ""
+                        }
+                except Exception:
+                    pass
+
+            # ── Entrada (NOTAENTRADA) ──────────────────────────────────────
+            elif not_entrada_id:
+                tipo = "Entrada"
+                try:
+                    cur.execute("""
+                        SELECT ne.NOT_CODIGO, ne.NOT_COMPROVANTE,
+                               ne.NOT_DESCRICAO, ne.NOT_FICHA,
+                               ne.NOT_VALORTOTAL, f.FIC_NOME
+                        FROM NOTAENTRADA ne
+                        LEFT JOIN FICHA f ON f.FIC_CODIGO = ne.NOT_FICHA
+                        WHERE ne.NOT_CODIGO = ?
+                    """, [not_entrada_id])
+                    r = cur.fetchone()
+                    if r:
+                        numero_doc = _s(r[1]) or str(r[0])
+                        descricao_entrada = _s(r[2])
+                        cliente_codigo = r[3]
+                        cliente_nome = _s(r[5])
+                        # Detecta se é ajuste do bridge
+                        if "bridge" in descricao_entrada.lower():
+                            tipo = "Ajuste Bridge"
+                        detalhes = {
+                            "numero_entrada": numero_doc,
+                            "descricao": descricao_entrada,
+                            "valor_total": _f(r[4])
+                        }
+                except Exception:
+                    pass
+
+            # ── Detecta tipo pela origem e quantidade ──────────────────────
+            if tipo == "Ajuste":
+                if mov_origem == "V":
+                    tipo = "Venda"
+                elif mov_origem == "C":
+                    tipo = "Compra/Entrada"
+                elif mov_qtde > 0:
+                    tipo = "Entrada"
+                elif mov_qtde < 0:
+                    tipo = "Saída"
+
+            resultado.append({
+                "mov_codigo":      mov_codigo,
+                "data":            str(mov_data) if mov_data else "",
+                "hora":            str(mov_hora) if mov_hora else "",
+                "tipo":            tipo,
+                "quantidade":      mov_qtde,
+                "saldo_apos":      mov_saldo,
+                "valor_unitario":  mov_valor_uni,
+                "valor_total":     mov_valor_total,
+                "documento":       numero_doc,
+                "cliente_codigo":  cliente_codigo,
+                "cliente_nome":    cliente_nome,
+                "origem":          mov_origem,
+                "detalhes":        detalhes,
+            })
+
+        return {
+            "codigo": codigo,
+            "total": len(resultado),
+            "movimentos": resultado
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Erro: {e}")
+    finally:
+        con.close()
