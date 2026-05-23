@@ -89,7 +89,20 @@ def puxar_enfoque(delta_desde=None, codigo=None) -> int:
         filtro = "AND p.PRO_CODIGO = ?"
         params.append(codigo)
     elif delta_desde:
-        filtro = "AND p.PRO_DATAALTERACAO >= ?"
+        # CORRIGIDO: detecta vendas, OS, condicionais e ajustes via MOVESTOQUE e ESTOQUE
+        filtro = """AND (
+            p.PRO_DATAALTERACAO >= ?
+            OR p.PRO_CODIGO IN (
+                SELECT DISTINCT MOV_PRODUTO FROM MOVESTOQUE
+                WHERE MOV_DATA >= ? AND MOV_ISEXCLUIDO = 0
+            )
+            OR p.PRO_CODIGO IN (
+                SELECT DISTINCT EST_PRODUTO FROM ESTOQUE
+                WHERE EST_DATAALTERACAO >= ?
+            )
+        )"""
+        params.append(delta_desde)
+        params.append(delta_desde)
         params.append(delta_desde)
 
     # Carrega tabelas auxiliares para resolução de nomes
@@ -216,8 +229,7 @@ def enviar_fila() -> dict:
     return {"enviados": enviados, "erros": erros}
 
 def _get_estoque_atual(cur, codigo):
-    """Retorna estoque atual via PRODUTOINVENTARIO (fonte de verdade do Enfoque)
-    e custos/precos do MOVESTOQUE mais recente."""
+    """Retorna estoque atual via PRODUTOINVENTARIO e custos/precos do MOVESTOQUE mais recente."""
     cur.execute("""
         SELECT FIRST 1
             MOV_CUSTO, MOV_CUSTOMEDIO, MOV_CUSTOPROPRIO,
