@@ -600,9 +600,7 @@ def produto_historico(codigo: int, limit: int = Query(100, le=500)):
                 m.MOV_ORIGEM,
                 m.MOV_NOTAENTRADA,
                 m.MOV_NOTASAIDA,
-                m.MOV_ORDEMSERVICO,
-                m.MOV_CONDICIONAL,
-                m.MOV_CODPRODUTO
+                m.MOV_MEMO
             FROM MOVESTOQUE m
             WHERE m.MOV_PRODUTO = ?
               AND m.MOV_ISEXCLUIDO = 0
@@ -623,8 +621,9 @@ def produto_historico(codigo: int, limit: int = Query(100, le=500)):
             mov_origem      = _s(row[7])
             not_entrada_id  = row[8]
             not_saida_id    = row[9]
-            os_id           = row[10]
-            cond_id         = row[11]
+            mov_memo        = _s(row[10])
+            os_id           = None
+            cond_id         = None
 
             tipo = "Ajuste"
             documento = ""
@@ -633,82 +632,60 @@ def produto_historico(codigo: int, limit: int = Query(100, le=500)):
             numero_doc = ""
             detalhes = {}
 
-            # ── Venda (NOTASAIDA) ──────────────────────────────────────────
+            # ── Venda / OS / Condicional via NOTASAIDA ────────────────────
             if not_saida_id:
                 tipo = "Venda"
                 try:
                     cur.execute("""
                         SELECT ns.NOT_CODIGO, ns.NOT_NUMERO, ns.NOT_FICHA,
-                               ns.NOT_DATA, ns.NOT_VALORTOTAL,
-                               f.FIC_NOME
+                               ns.NOT_DATA, ns.NOT_VALORTOTAL, ns.NOT_TIPO,
+                               f.FIC_NOME,
+                               os.ORD_CODIGO, os.ORD_STATUS, os.ORD_QUILOMETRAGEM,
+                               v.VEI_PLACA, v.VEI_MODELO,
+                               cn.CON_CODIGO, cn.CON_STATUS, cn.CON_DATAPREVISTA
                         FROM NOTASAIDA ns
                         LEFT JOIN FICHA f ON f.FIC_CODIGO = ns.NOT_FICHA
+                        LEFT JOIN ORDEMSERVICO os ON os.ORD_CODIGO = ns.NOT_ORDEMSERVICO
+                        LEFT JOIN VEICULO v ON v.VEI_CODIGO = os.ORD_VEICULO
+                        LEFT JOIN CONDICIONAL cn ON cn.CON_CODIGO = ns.NOT_CONDICIONAL
                         WHERE ns.NOT_CODIGO = ?
                     """, [not_saida_id])
                     r = cur.fetchone()
                     if r:
                         numero_doc = _s(r[1]) or str(r[0])
                         cliente_codigo = r[2]
-                        cliente_nome = _s(r[5])
-                        detalhes = {
-                            "numero_nota": numero_doc,
-                            "valor_total": _f(r[4])
-                        }
-                except Exception:
-                    pass
-
-            # ── Ordem de Serviço ───────────────────────────────────────────
-            elif os_id:
-                tipo = "Ordem de Serviço"
-                try:
-                    cur.execute("""
-                        SELECT o.ORD_CODIGO, o.ORD_FICHA, o.ORD_VEICULO,
-                               o.ORD_STATUS, o.ORD_DATA, o.ORD_QUILOMETRAGEM,
-                               f.FIC_NOME,
-                               v.VEI_PLACA, v.VEI_MODELO
-                        FROM ORDEMSERVICO o
-                        LEFT JOIN FICHA f ON f.FIC_CODIGO = o.ORD_FICHA
-                        LEFT JOIN VEICULO v ON v.VEI_CODIGO = o.ORD_VEICULO
-                        WHERE o.ORD_CODIGO = ?
-                    """, [os_id])
-                    r = cur.fetchone()
-                    if r:
-                        numero_doc = str(r[0])
-                        cliente_codigo = r[1]
                         cliente_nome = _s(r[6])
-                        detalhes = {
-                            "numero_os": r[0],
-                            "status": r[3],
-                            "quilometragem": r[5],
-                            "veiculo_placa": _s(r[7]),
-                            "veiculo_modelo": _s(r[8])
-                        }
-                except Exception:
-                    pass
+                        not_tipo = r[5]
 
-            # ── Condicional ────────────────────────────────────────────────
-            elif cond_id:
-                tipo = "Condicional"
-                try:
-                    cur.execute("""
-                        SELECT c.CON_CODIGO, c.CON_FICHA, c.CON_DATA,
-                               c.CON_STATUS, c.CON_TOTAL, c.CON_DATAPREVISTA,
-                               f.FIC_NOME
-                        FROM CONDICIONAL c
-                        LEFT JOIN FICHA f ON f.FIC_CODIGO = c.CON_FICHA
-                        WHERE c.CON_CODIGO = ?
-                    """, [cond_id])
-                    r = cur.fetchone()
-                    if r:
-                        numero_doc = str(r[0])
-                        cliente_codigo = r[1]
-                        cliente_nome = _s(r[6])
-                        detalhes = {
-                            "numero_condicional": r[0],
-                            "status": r[3],
-                            "valor_total": _f(r[4]),
-                            "data_prevista": str(r[5]) if r[5] else ""
-                        }
+                        # Verifica se é OS
+                        if r[7]:
+                            tipo = "Ordem de Serviço"
+                            os_id = r[7]
+                            detalhes = {
+                                "numero_nota": numero_doc,
+                                "numero_os": r[7],
+                                "status_os": r[8],
+                                "quilometragem": r[9],
+                                "veiculo_placa": _s(r[10]),
+                                "veiculo_modelo": _s(r[11]),
+                                "valor_total": _f(r[4])
+                            }
+                        # Verifica se é Condicional
+                        elif r[12]:
+                            tipo = "Condicional"
+                            cond_id = r[12]
+                            detalhes = {
+                                "numero_nota": numero_doc,
+                                "numero_condicional": r[12],
+                                "status_condicional": r[13],
+                                "data_prevista": str(r[14]) if r[14] else "",
+                                "valor_total": _f(r[4])
+                            }
+                        else:
+                            detalhes = {
+                                "numero_nota": numero_doc,
+                                "valor_total": _f(r[4])
+                            }
                 except Exception:
                     pass
 
