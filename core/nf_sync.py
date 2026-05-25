@@ -1,7 +1,4 @@
-"""core/nf_sync.py - Sync NFs Enfoque (Firebird) -> Supabase
-Importa cabecalho + itens com descricao/codigo do Enfoque.
-Nao toca em pecas. peca_id fica null se nao encontrar.
-"""
+"""core/nf_sync.py - Sync NFs Enfoque (Firebird) -> Supabase"""
 
 import os
 from datetime import datetime, timedelta
@@ -141,11 +138,10 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
                 ne.NOT_COMPROVANTE,
                 ne.NOT_DATAEMISSAO,
                 ne.NOT_VALORTOTAL,
-                ne.NOT_SERIE
+                ne.NOT_SERIE,
+                ne.NOT_TIPO
             FROM NOTAENTRADA ne
-            WHERE ne.NOT_ISATIVO = 1
-              AND ne.NOT_TIPO IN (1, 2)
-              AND ne.NOT_DATA >= ?
+            WHERE ne.NOT_DATA >= ?
               AND ne.NOT_COMPROVANTE IS NOT NULL
               AND TRIM(ne.NOT_COMPROVANTE) != ''
               AND TRIM(ne.NOT_COMPROVANTE) != 'SN'
@@ -158,7 +154,9 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
             con.close()
             return 0
 
-        print(f"  {len(notas)} NF(s) encontradas no Firebird")
+        # Log dos tipos encontrados para diagnostico
+        tipos = set(_s(n[5]) for n in notas)
+        print(f"  {len(notas)} NF(s) encontradas — tipos: {tipos}")
 
         for nota in notas:
             not_codigo   = nota[0]
@@ -173,7 +171,6 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
             if _nf_ja_existe(numero_nf):
                 continue
 
-            # Busca itens do Firebird
             cur.execute("""
                 SELECT
                     m.MOV_PRODUTO,
