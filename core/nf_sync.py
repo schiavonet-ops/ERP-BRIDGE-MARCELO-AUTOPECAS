@@ -1,12 +1,10 @@
-"""core/nf_sync.py - Sincronizacao de Notas Fiscais de Entrada Enfoque -> Supabase
-
-NAO altera o fluxo de produtos (sync_worker.py / local_db.py).
-Busca NFs de compra do Firebird e faz upsert nas tabelas
-pecas_entradas e pecas_entradas_itens do Supabase.
+"""core/nf_sync.py - Sync NFs Enfoque (Firebird) -> Supabase
+Completamente separado do sync_worker.py / local_db.py.
+Nao toca em nenhum outro arquivo.
 """
 
 import os
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 from core.sync_worker import _conectar
 from core.local_db import log
 
@@ -17,7 +15,10 @@ except ImportError:
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+EMPRESA_ID   = os.getenv("EMPRESA_ID", "")
 
+
+# ── helpers ──────────────────────────────────────────────────────────────────
 
 def _s(v) -> str:
     if v is None:
@@ -34,56 +35,126 @@ def _f(v) -> float:
         return 0.0
 
 
-def _to_date(v):
-    """Converte qualquer valor para date, aceitando date, datetime ou string."""
-    if v is None:
-        return (datetime.now() - timedelta(days=90)).date()
-    if isinstance(v, datetime):
-        return v.date()
-    if isinstance(v, date):
-        return v
-    try:
-        return datetime.fromisoformat(str(v)[:10]).date()
-    except Exception:
-        return (datetime.now() - timedelta(days=90)).date()
-
-
-def _supabase_upsert(tabela: str, registros: list, on_conflict: str) -> bool:
-    if not registros or not SUPABASE_URL or not SUPABASE_KEY:
-        return False
-    if httpx is None:
-        print("  httpx nao instalado - pip install httpx")
-        return False
-    url = f"{SUPABASE_URL}/rest/v1/{tabela}"
-    headers = {
+def _base_headers():
+    return {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
-        "Prefer": "resolution=merge-duplicates,return=minimal",
     }
+
+
+# ── lookups no Supabase ───────────────────────────────────────────────────────
+
+def _get_fornecedor_id(cnpj: str) -> str | None:
+    """Busca fornecedor_id pelo CNPJ."""
+    if not cnpj:
+        return None
     try:
-        r = httpx.post(url, json=registros, headers=headers,
-                       params={"on_conflict": on_conflict}, timeout=30)
-        if r.status_code not in (200, 201):
-            print(f"  Supabase {tabela}: {r.status_code} {r.text[:200]}")
-            return False
-        return True
+        r = httpx.get(
+            f"{SUPABASE_URL}/rest/v1/fornecedores",
+            headers=_base_headers(),
+            params={"cnpj": f"eq.{cnpj}", "empresa_id": f"eq.{EMPRESA_ID}", "select": "id"},
+            timeout=10,
+        )
+        if r.status_code == 200 and r.json():
+            return r.json()[0]["id"]
+    except Exception:
+        pass
+    return None
+
+
+def _batch_peca_ids(codigos: list[str]) -> dict[str, str]:
+    """Retorna {codigo_erp: peca_id} para todos os codigos de uma vez."""
+    if not codigos:
+        return {}
+    try:
+        codigos_unicos = list(set(c for c in codigos if c))
+        # Supabase REST: in.(a,b,c)
+        filtro = "in.(" + ",".join(codigos_unicos) + ")"
+        r = httpx.get(
+            f"{SUPABASE_URL}/rest/v1/pecas",
+            headers=_base_headers(),
+            params={"codigo_erp": filtro, "empresa_id": f"eq.{EMPRESA_ID}", "select": "id,codigo_erp"},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            return {row["codigo_erp"]: row["id"] for row in r.json() if row.get("codigo_erp")}
     except Exception as e:
-        print(f"  Supabase erro: {e}")
+        print(f"  Erro batch peca_ids: {e}")
+    return {}
+
+
+def _nf_ja_existe(numero_nf: str) -> bool:
+    """Evita duplicar NFs ja sincronizadas."""
+    try:
+        r = httpx.get(
+            f"{SUPABASE_URL}/rest/v1/pecas_entradas",
+            headers=_base_headers(),
+            params={
+                "numero_nf":  f"eq.{numero_nf}",
+                "empresa_id": f"eq.{EMPRESA_ID}",
+                "origem_compra": "eq.enfoque",
+                "select": "id",
+            },
+            timeout=10,
+        )
+        return r.status_code == 200 and len(r.json()) > 0
+    except Exception:
         return False
 
 
+def _inserir_entrada(payload: dict) -> str | None:
+    """Insere cabecalho da NF, retorna o id gerado."""
+    try:
+        r = httpx.post(
+            f"{SUPABASE_URL}/rest/v1/pecas_entradas",
+            json=payload,
+            headers={**_base_headers(), "Prefer": "return=representation"},
+            timeout=15,
+        )
+        if r.status_code in (200, 201) and r.json():
+            return r.json()[0]["id"]
+        print(f"  Erro cabecalho: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"  Erro inserir entrada: {e}")
+    return None
+
+
+def _inserir_itens(itens: list) -> None:
+    if not itens:
+        return
+    try:
+        r = httpx.post(
+            f"{SUPABASE_URL}/rest/v1/pecas_entradas_itens",
+            json=itens,
+            headers={**_base_headers(), "Prefer": "return=minimal"},
+            timeout=30,
+        )
+        if r.status_code not in (200, 201):
+            print(f"  Erro itens: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"  Erro inserir itens: {e}")
+
+
+# ── funcao principal ──────────────────────────────────────────────────────────
+
 def puxar_nfs_enfoque(delta_desde=None) -> int:
-    """
-    Busca NFs de compra para revenda do Firebird e sincroniza com Supabase.
-    delta_desde: datetime | date | None. Se None, busca ultimos 90 dias.
-    Nao toca em sync_worker.py nem local_db.py.
-    """
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Sincronizando NFs de entrada...")
 
-    # Sempre converte para date puro — Firebird nao aceita datetime com hora
-    data_filtro = _to_date(delta_desde)
-    print(f"  Buscando NFs a partir de {data_filtro}")
+    if not SUPABASE_URL or not SUPABASE_KEY or not EMPRESA_ID:
+        print("  Faltam variaveis: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, EMPRESA_ID")
+        return 0
+    if httpx is None:
+        print("  httpx nao instalado - pip install httpx")
+        return 0
+
+    # Garante que delta_desde e sempre date (sem hora) para o Firebird aceitar
+    if delta_desde is None:
+        data_corte = (datetime.now() - timedelta(days=90)).date()
+    elif isinstance(delta_desde, datetime):
+        data_corte = delta_desde.date()
+    else:
+        data_corte = delta_desde  # ja e date
 
     try:
         con = _conectar()
@@ -92,18 +163,17 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
         return 0
 
     cur = con.cursor()
+    sincronizadas = 0
+
     try:
         cur.execute("""
             SELECT
                 ne.NOT_CODIGO,
                 ne.NOT_COMPROVANTE,
-                ne.NOT_DATA,
                 ne.NOT_DATAEMISSAO,
+                ne.NOT_DATA,
                 ne.NOT_VALORTOTAL,
-                ne.NOT_FICHA,
-                ne.NOT_TIPO,
-                ne.NOT_DESCRICAO,
-                f.FIC_NOME,
+                ne.NOT_SERIE,
                 f.FIC_CNPJ
             FROM NOTAENTRADA ne
             LEFT JOIN FICHA f ON f.FIC_CODIGO = ne.NOT_FICHA
@@ -114,37 +184,39 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
               AND TRIM(ne.NOT_COMPROVANTE) != ''
               AND TRIM(ne.NOT_COMPROVANTE) != 'SN'
             ORDER BY ne.NOT_DATA DESC
-        """, [data_filtro])
+        """, [data_corte])
 
-        notas_raw = cur.fetchall()
-        if not notas_raw:
-            print("  Nenhuma NF nova")
+        notas = cur.fetchall()
+        if not notas:
+            print("  Nenhuma NF encontrada")
             con.close()
             return 0
 
-        print(f"  {len(notas_raw)} NF(s) encontradas")
+        print(f"  {len(notas)} NF(s) encontradas no Firebird")
 
-        notas_supabase = []
-        itens_supabase = []
+        for nota in notas:
+            not_codigo   = nota[0]
+            numero_nf    = _s(nota[1])
+            data_emissao = str(nota[2])[:10] if nota[2] else None
+            valor_total  = _f(nota[4])
+            serie        = _s(nota[5]) or None
+            cnpj         = _s(nota[6])
 
-        for nota in notas_raw:
-            not_codigo  = nota[0]
-            not_numero  = _s(nota[1])
-            not_data    = str(nota[2]) if nota[2] else None
-            not_emissao = str(nota[3]) if nota[3] else not_data
-            not_total   = _f(nota[4])
-            fic_nome    = _s(nota[8])
-            fic_cnpj    = _s(nota[9])
+            if not numero_nf:
+                continue
 
+            if _nf_ja_existe(numero_nf):
+                continue
+
+            fornecedor_id = _get_fornecedor_id(cnpj) if cnpj else None
+
+            # Buscar itens do Firebird
             cur.execute("""
                 SELECT
                     m.MOV_PRODUTO,
                     m.MOV_QTDE,
-                    m.MOV_VALORUNI,
-                    m.MOV_VALORTOTAL,
-                    p.PRO_NOME
+                    m.MOV_VALORUNI
                 FROM MOVESTOQUE m
-                LEFT JOIN PRODUTO p ON p.PRO_CODIGO = m.MOV_PRODUTO
                 WHERE m.MOV_NOTAENTRADA = ?
                   AND m.MOV_ISEXCLUIDO = 0
                   AND m.MOV_QTDE > 0
@@ -154,50 +226,61 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
             if not itens_raw:
                 continue
 
-            notas_supabase.append({
-                "numero_nota":     not_numero,
-                "data_emissao":    not_emissao,
-                "data_entrada":    not_data,
-                "fornecedor_nome": fic_nome,
-                "fornecedor_cnpj": fic_cnpj,
-                "valor_total":     not_total,
-                "qtd_itens":       len(itens_raw),
-            })
+            # Batch lookup de pecas pelo codigo_erp
+            codigos = [_s(i[0]) for i in itens_raw]
+            mapa_pecas = _batch_peca_ids(codigos)
 
+            # So insere a NF se tiver pelo menos 1 item vinculado
+            itens_ok = []
             for item in itens_raw:
-                itens_supabase.append({
-                    "nota_numero":    not_numero,
-                    "codigo_enfoque": item[0],
-                    "quantidade":     _f(item[1]),
-                    "custo_unitario": _f(item[2]),
-                    "custo_total":    _f(item[3]),
-                    "descricao":      _s(item[4]),
-                    "status":         "pendente",
+                codigo_erp = _s(item[0])
+                peca_id = mapa_pecas.get(codigo_erp)
+                if not peca_id:
+                    continue  # peca nao cadastrada no EPP, pula
+                itens_ok.append({
+                    "peca_id":              peca_id,
+                    "quantidade":           _f(item[1]),
+                    "valor_unitario":       _f(item[2]),
+                    "custo_final_unitario": _f(item[2]),
                 })
 
-        if not notas_supabase:
-            print("  Nenhuma NF com itens validos")
-            con.close()
-            return 0
+            if not itens_ok:
+                continue
 
-        _supabase_upsert("pecas_entradas", notas_supabase, "numero_nota")
+            entrada_id = _inserir_entrada({
+                "empresa_id":       EMPRESA_ID,
+                "numero_nf":        numero_nf,
+                "serie":            serie,
+                "data_emissao":     data_emissao,
+                "fornecedor_id":    fornecedor_id,
+                "valor_total_nota": valor_total,
+                "origem_compra":    "enfoque",
+                "status":           "ATIVA",
+                "tipo":             "NF",
+            })
 
-        for i in range(0, len(itens_supabase), 100):
-            _supabase_upsert("pecas_entradas_itens",
-                             itens_supabase[i:i+100],
-                             "nota_numero,codigo_enfoque")
+            if not entrada_id:
+                continue
 
-        msg = f"NFs: {len(notas_supabase)} notas, {len(itens_supabase)} itens"
+            # Adiciona entrada_id em cada item agora que temos o UUID
+            for it in itens_ok:
+                it["entrada_id"] = entrada_id
+
+            _inserir_itens(itens_ok)
+            sincronizadas += 1
+            print(f"    NF {numero_nf}: {len(itens_ok)} item(s)")
+
+        msg = f"{sincronizadas} NF(s) sincronizadas"
         print(f"  OK {msg}")
         log("nf_sync_ok", msg)
-        con.close()
-        return len(notas_supabase)
 
     except Exception as e:
         print(f"  Erro NF sync: {e}")
         log("erro", f"nf_sync: {e}")
+    finally:
         try:
             con.close()
         except Exception:
             pass
-        return 0
+
+    return sincronizadas
