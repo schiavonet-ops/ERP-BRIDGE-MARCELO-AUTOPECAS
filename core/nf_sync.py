@@ -6,7 +6,7 @@ pecas_entradas e pecas_entradas_itens do Supabase.
 """
 
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from core.sync_worker import _conectar
 from core.local_db import log
 
@@ -34,6 +34,20 @@ def _f(v) -> float:
         return 0.0
 
 
+def _to_date(v):
+    """Converte qualquer valor para date, aceitando date, datetime ou string."""
+    if v is None:
+        return (datetime.now() - timedelta(days=90)).date()
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    try:
+        return datetime.fromisoformat(str(v)[:10]).date()
+    except Exception:
+        return (datetime.now() - timedelta(days=90)).date()
+
+
 def _supabase_upsert(tabela: str, registros: list, on_conflict: str) -> bool:
     if not registros or not SUPABASE_URL or not SUPABASE_KEY:
         return False
@@ -59,38 +73,17 @@ def _supabase_upsert(tabela: str, registros: list, on_conflict: str) -> bool:
         return False
 
 
-def _ultima_sync_nf():
-    """Retorna a data da NF mais recente ja no Supabase."""
-    if not SUPABASE_URL or not SUPABASE_KEY or httpx is None:
-        return None
-    try:
-        r = httpx.get(
-            f"{SUPABASE_URL}/rest/v1/pecas_entradas",
-            headers={"apikey": SUPABASE_KEY,
-                     "Authorization": f"Bearer {SUPABASE_KEY}"},
-            params={"select": "data_emissao",
-                    "order": "data_emissao.desc", "limit": "1"},
-            timeout=10,
-        )
-        if r.status_code == 200 and r.json():
-            data_str = r.json()[0].get("data_emissao", "")
-            if data_str:
-                return datetime.fromisoformat(data_str[:10])
-    except Exception:
-        pass
-    return None
-
-
 def puxar_nfs_enfoque(delta_desde=None) -> int:
     """
     Busca NFs de compra para revenda do Firebird e sincroniza com Supabase.
-    delta_desde: datetime | None. Se None, busca ultimos 90 dias.
+    delta_desde: datetime | date | None. Se None, busca ultimos 90 dias.
     Nao toca em sync_worker.py nem local_db.py.
     """
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Sincronizando NFs de entrada...")
 
-    if delta_desde is None:
-        delta_desde = datetime.now() - timedelta(days=90)
+    # Sempre converte para date puro — Firebird nao aceita datetime com hora
+    data_filtro = _to_date(delta_desde)
+    print(f"  Buscando NFs a partir de {data_filtro}")
 
     try:
         con = _conectar()
@@ -121,7 +114,7 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
               AND TRIM(ne.NOT_COMPROVANTE) != ''
               AND TRIM(ne.NOT_COMPROVANTE) != 'SN'
             ORDER BY ne.NOT_DATA DESC
-        """, [delta_desde.date()])
+        """, [data_filtro])
 
         notas_raw = cur.fetchall()
         if not notas_raw:
