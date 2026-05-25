@@ -163,9 +163,6 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
                 ne.NOT_FICHA
             FROM NOTAENTRADA ne
             WHERE ne.NOT_DATA >= ?
-              AND ne.NOT_COMPROVANTE IS NOT NULL
-              AND TRIM(ne.NOT_COMPROVANTE) != ''
-              AND TRIM(ne.NOT_COMPROVANTE) != 'SN'
             ORDER BY ne.NOT_DATA DESC
         """, [data_corte])
 
@@ -179,14 +176,17 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
 
         for nota in notas:
             not_codigo   = nota[0]
-            numero_nf    = _s(nota[1])
+            comprovante  = _s(nota[1])
             data_emissao = str(nota[2])[:10] if nota[2] else None
             valor_total  = _f(nota[3])
             serie        = _s(nota[4]) or None
             ficha_codigo = nota[5]
 
-            if not numero_nf:
-                continue
+            # Usa numero NF-e se tiver, senao usa codigo interno prefixado
+            if comprovante and comprovante not in ("SN", "NE", ""):
+                numero_nf = comprovante
+            else:
+                numero_nf = f"ENF-{not_codigo}"
 
             cnpj = _get_cnpj_ficha(cur, ficha_codigo)
             if cnpj in CNPJS_BLOQUEADOS:
