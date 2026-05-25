@@ -182,8 +182,8 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
             serie        = _s(nota[4]) or None
             ficha_codigo = nota[5]
 
-            # Usa numero NF-e se tiver, senao usa codigo interno prefixado
-            if comprovante and comprovante not in ("SN", "NE", ""):
+            # Usa numero do comprovante se existir, senao usa codigo interno
+            if comprovante and comprovante != 'SN':
                 numero_nf = comprovante
             else:
                 numero_nf = f"ENF-{not_codigo}"
