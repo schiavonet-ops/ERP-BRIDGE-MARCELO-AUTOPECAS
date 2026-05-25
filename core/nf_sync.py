@@ -41,23 +41,6 @@ def _headers():
     }
 
 
-def _get_fornecedor_id(cnpj: str) -> str | None:
-    if not cnpj:
-        return None
-    try:
-        r = httpx.get(
-            f"{SUPABASE_URL}/rest/v1/fornecedores",
-            headers=_headers(),
-            params={"cnpj": f"eq.{cnpj}", "empresa_id": f"eq.{EMPRESA_ID}", "select": "id"},
-            timeout=10,
-        )
-        if r.status_code == 200 and r.json():
-            return r.json()[0]["id"]
-    except Exception:
-        pass
-    return None
-
-
 def _get_peca_id(codigo_erp: str) -> str | None:
     if not codigo_erp:
         return None
@@ -158,10 +141,8 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
                 ne.NOT_COMPROVANTE,
                 ne.NOT_DATAEMISSAO,
                 ne.NOT_VALORTOTAL,
-                ne.NOT_SERIE,
-                f.FIC_CNPJ
+                ne.NOT_SERIE
             FROM NOTAENTRADA ne
-            LEFT JOIN FICHA f ON f.FIC_CODIGO = ne.NOT_FICHA
             WHERE ne.NOT_ISATIVO = 1
               AND ne.NOT_TIPO IN (1, 2)
               AND ne.NOT_DATA >= ?
@@ -185,15 +166,12 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
             data_emissao = str(nota[2])[:10] if nota[2] else None
             valor_total  = _f(nota[3])
             serie        = _s(nota[4]) or None
-            cnpj         = _s(nota[5])
 
             if not numero_nf:
                 continue
 
             if _nf_ja_existe(numero_nf):
                 continue
-
-            fornecedor_id = _get_fornecedor_id(cnpj) if cnpj else None
 
             # Busca itens do Firebird
             cur.execute("""
@@ -218,7 +196,6 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
                 "numero_nf":        numero_nf,
                 "serie":            serie,
                 "data_emissao":     data_emissao,
-                "fornecedor_id":    fornecedor_id,
                 "valor_total_nota": valor_total,
                 "origem_compra":    "enfoque",
                 "status":           "ATIVA",
@@ -230,13 +207,13 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
 
             itens = []
             for item in itens_raw:
-                codigo_erp  = _s(item[0])
-                descricao   = _s(item[3])
-                peca_id     = _get_peca_id(codigo_erp) if codigo_erp else None
+                codigo_erp = _s(item[0])
+                descricao  = _s(item[3])
+                peca_id    = _get_peca_id(codigo_erp) if codigo_erp else None
 
                 itens.append({
                     "entrada_id":           entrada_id,
-                    "peca_id":              peca_id,        # null se nao encontrar
+                    "peca_id":              peca_id,
                     "codigo_item":          codigo_erp,
                     "descricao_item":       descricao,
                     "quantidade":           _f(item[1]),
