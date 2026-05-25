@@ -14,7 +14,6 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 EMPRESA_ID   = os.getenv("EMPRESA_ID", "")
 
-# CNPJs bloqueados — NFs desses fornecedores nao serao importadas
 CNPJS_BLOQUEADOS = {"91229252000223"}
 
 
@@ -42,7 +41,6 @@ def _headers():
 
 
 def _get_cnpj_ficha(cur, ficha_codigo) -> str:
-    """Tenta buscar CNPJ do fornecedor na tabela FICHA."""
     if not ficha_codigo:
         return ""
     for campo in ("FIC_CGCCPF", "FIC_CNPJ", "FIC_CPF"):
@@ -58,7 +56,6 @@ def _get_cnpj_ficha(cur, ficha_codigo) -> str:
 
 
 def _batch_peca_ids(codigos: list) -> dict:
-    """Busca todos os peca_ids de uma vez — uma unica chamada HTTP."""
     if not codigos:
         return {}
     unicos = list(set(c for c in codigos if c))
@@ -191,7 +188,6 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
             if not numero_nf:
                 continue
 
-            # Filtro por CNPJ bloqueado
             cnpj = _get_cnpj_ficha(cur, ficha_codigo)
             if cnpj in CNPJS_BLOQUEADOS:
                 continue
@@ -260,3 +256,7 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
             pass
 
     return sincronizadas
+
+
+if __name__ == "__main__":
+    puxar_nfs_enfoque()
