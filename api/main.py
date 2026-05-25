@@ -479,10 +479,7 @@ def sync_puxar(completo: bool = Query(False)):
     s = db.status_sync()
     delta_desde = None if completo else s.get("ultima_sync")
     n = puxar_enfoque(delta_desde=delta_desde)
-    nf_delta = None if completo else (
-        datetime.fromisoformat(str(delta_desde)) - timedelta(days=1) if delta_desde else None
-    )
-    puxar_nfs_enfoque(delta_desde=nf_delta)
+    puxar_nfs_enfoque()
     return {"sincronizados": n, "modo": "completo" if completo else "delta"}
 
 @app.post("/sync/enviar")
