@@ -58,27 +58,6 @@ def _get_fornecedor_id(cnpj: str) -> str | None:
     return None
 
 
-def _batch_peca_ids(codigos: list) -> dict:
-    if not codigos:
-        return {}
-    unicos = list(set(c for c in codigos if c))
-    if not unicos:
-        return {}
-    try:
-        filtro = "in.(" + ",".join(unicos) + ")"
-        r = httpx.get(
-            f"{SUPABASE_URL}/rest/v1/pecas",
-            headers=_headers(),
-            params={"codigo_erp": filtro, "empresa_id": f"eq.{EMPRESA_ID}", "select": "id,codigo_erp"},
-            timeout=15,
-        )
-        if r.status_code == 200:
-            return {row["codigo_erp"]: row["id"] for row in r.json() if row.get("codigo_erp")}
-    except Exception as e:
-        print(f"  Erro batch pecas: {e}")
-    return {}
-
-
 def _nf_ja_existe(numero_nf: str) -> bool:
     try:
         r = httpx.get(
@@ -211,9 +190,6 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
             if not itens_raw:
                 continue
 
-            codigos = [_s(i[0]) for i in itens_raw]
-            mapa_pecas = _batch_peca_ids(codigos)
-
             entrada_id = _inserir_entrada({
                 "empresa_id":       EMPRESA_ID,
                 "numero_nf":        numero_nf,
@@ -231,11 +207,9 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
 
             itens = []
             for item in itens_raw:
-                codigo_erp = _s(item[0])
                 itens.append({
                     "entrada_id":           entrada_id,
-                    "peca_id":              mapa_pecas.get(codigo_erp),
-                    "codigo_item":          codigo_erp,
+                    "codigo_item":          _s(item[0]),
                     "descricao_item":       _s(item[3]),
                     "quantidade":           _f(item[1]),
                     "valor_unitario":       _f(item[2]),
