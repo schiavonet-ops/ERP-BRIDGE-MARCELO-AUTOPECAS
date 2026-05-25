@@ -18,6 +18,7 @@ from datetime import datetime
 
 import core.local_db as db
 from core.sync_worker import puxar_enfoque, enviar_fila, enfoque_online, _conectar
+from core.nf_sync import puxar_nfs_enfoque  # ← ADIÇÃO 1
 
 app = FastAPI(
     title="Estoque Bridge — Enfoque ↔ AutoPeças Pro",
@@ -564,6 +565,16 @@ def sync_delta():
     delta_desde = s.get("ultima_sync")
     n = puxar_enfoque(delta_desde=delta_desde)
     return {"sincronizados": n, "modo": "delta"}
+
+# ─── Sync de NFs de entrada (separado, não interfere nos produtos) ────────────  ← ADIÇÃO 2
+
+@app.post("/sync/nfs")
+def sync_nfs(completo: bool = Query(False)):
+    """Sincroniza NFs de compra do Enfoque → Supabase. Independente do sync de produtos."""
+    from datetime import timedelta
+    delta = None if completo else (datetime.now() - timedelta(days=7)).date()
+    n = puxar_nfs_enfoque(delta_desde=delta)
+    return {"sincronizadas": n, "modo": "completo" if completo else "delta"}
 
 
 # ─── Histórico de movimentações do produto ────────────────────────────────────
