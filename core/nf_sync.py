@@ -14,6 +14,9 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 EMPRESA_ID   = os.getenv("EMPRESA_ID", "")
 
+# CNPJs bloqueados — NFs desses fornecedores nao serao importadas
+CNPJS_BLOQUEADOS = {"91229252000223"}
+
 
 def _s(v) -> str:
     if v is None:
@@ -38,21 +41,42 @@ def _headers():
     }
 
 
-def _get_peca_id(codigo_erp: str) -> str | None:
-    if not codigo_erp:
-        return None
+def _get_cnpj_ficha(cur, ficha_codigo) -> str:
+    """Tenta buscar CNPJ do fornecedor na tabela FICHA."""
+    if not ficha_codigo:
+        return ""
+    for campo in ("FIC_CGCCPF", "FIC_CNPJ", "FIC_CPF"):
+        try:
+            cur.execute(f"SELECT {campo} FROM FICHA WHERE FIC_CODIGO = ?", [ficha_codigo])
+            row = cur.fetchone()
+            if row:
+                cnpj = _s(row[0]).replace(".", "").replace("/", "").replace("-", "").strip()
+                return cnpj
+        except Exception:
+            continue
+    return ""
+
+
+def _batch_peca_ids(codigos: list) -> dict:
+    """Busca todos os peca_ids de uma vez — uma unica chamada HTTP."""
+    if not codigos:
+        return {}
+    unicos = list(set(c for c in codigos if c))
+    if not unicos:
+        return {}
     try:
+        filtro = "in.(" + ",".join(unicos) + ")"
         r = httpx.get(
             f"{SUPABASE_URL}/rest/v1/pecas",
             headers=_headers(),
-            params={"codigo_erp": f"eq.{codigo_erp}", "empresa_id": f"eq.{EMPRESA_ID}", "select": "id"},
-            timeout=10,
+            params={"codigo_erp": filtro, "empresa_id": f"eq.{EMPRESA_ID}", "select": "id,codigo_erp"},
+            timeout=15,
         )
-        if r.status_code == 200 and r.json():
-            return r.json()[0]["id"]
-    except Exception:
-        pass
-    return None
+        if r.status_code == 200:
+            return {row["codigo_erp"]: row["id"] for row in r.json() if row.get("codigo_erp")}
+    except Exception as e:
+        print(f"  Erro batch pecas: {e}")
+    return {}
 
 
 def _nf_ja_existe(numero_nf: str) -> bool:
@@ -116,7 +140,7 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
         return 0
 
     if delta_desde is None:
-        data_corte = (datetime.now() - timedelta(days=90)).date()
+        data_corte = (datetime.now() - timedelta(days=1)).date()
     elif isinstance(delta_desde, datetime):
         data_corte = delta_desde.date()
     else:
@@ -139,7 +163,7 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
                 ne.NOT_DATAEMISSAO,
                 ne.NOT_VALORTOTAL,
                 ne.NOT_SERIE,
-                ne.NOT_TIPO
+                ne.NOT_FICHA
             FROM NOTAENTRADA ne
             WHERE ne.NOT_DATA >= ?
               AND ne.NOT_COMPROVANTE IS NOT NULL
@@ -154,9 +178,7 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
             con.close()
             return 0
 
-        # Log dos tipos encontrados para diagnostico
-        tipos = set(_s(n[5]) for n in notas)
-        print(f"  {len(notas)} NF(s) encontradas — tipos: {tipos}")
+        print(f"  {len(notas)} NF(s) encontradas no Firebird")
 
         for nota in notas:
             not_codigo   = nota[0]
@@ -164,19 +186,21 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
             data_emissao = str(nota[2])[:10] if nota[2] else None
             valor_total  = _f(nota[3])
             serie        = _s(nota[4]) or None
+            ficha_codigo = nota[5]
 
             if not numero_nf:
+                continue
+
+            # Filtro por CNPJ bloqueado
+            cnpj = _get_cnpj_ficha(cur, ficha_codigo)
+            if cnpj in CNPJS_BLOQUEADOS:
                 continue
 
             if _nf_ja_existe(numero_nf):
                 continue
 
             cur.execute("""
-                SELECT
-                    m.MOV_PRODUTO,
-                    m.MOV_QTDE,
-                    m.MOV_VALORUNI,
-                    p.PRO_NOME
+                SELECT m.MOV_PRODUTO, m.MOV_QTDE, m.MOV_VALORUNI, p.PRO_NOME
                 FROM MOVESTOQUE m
                 LEFT JOIN PRODUTO p ON p.PRO_CODIGO = m.MOV_PRODUTO
                 WHERE m.MOV_NOTAENTRADA = ?
@@ -187,6 +211,9 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
             itens_raw = cur.fetchall()
             if not itens_raw:
                 continue
+
+            codigos = [_s(i[0]) for i in itens_raw]
+            mapa_pecas = _batch_peca_ids(codigos)
 
             entrada_id = _inserir_entrada({
                 "empresa_id":       EMPRESA_ID,
@@ -205,14 +232,11 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
             itens = []
             for item in itens_raw:
                 codigo_erp = _s(item[0])
-                descricao  = _s(item[3])
-                peca_id    = _get_peca_id(codigo_erp) if codigo_erp else None
-
                 itens.append({
                     "entrada_id":           entrada_id,
-                    "peca_id":              peca_id,
+                    "peca_id":              mapa_pecas.get(codigo_erp),
                     "codigo_item":          codigo_erp,
-                    "descricao_item":       descricao,
+                    "descricao_item":       _s(item[3]),
                     "quantidade":           _f(item[1]),
                     "valor_unitario":       _f(item[2]),
                     "custo_final_unitario": _f(item[2]),
