@@ -40,19 +40,22 @@ def _headers():
     }
 
 
-def _get_cnpj_ficha(cur, ficha_codigo) -> str:
-    if not ficha_codigo:
-        return ""
-    for campo in ("FIC_CGCCPF", "FIC_CNPJ", "FIC_CPF"):
-        try:
-            cur.execute(f"SELECT {campo} FROM FICHA WHERE FIC_CODIGO = ?", [ficha_codigo])
-            row = cur.fetchone()
-            if row:
-                cnpj = _s(row[0]).replace(".", "").replace("/", "").replace("-", "").strip()
-                return cnpj
-        except Exception:
-            continue
-    return ""
+def _get_fornecedor_id(cnpj: str) -> str | None:
+    if not cnpj:
+        return None
+    cnpj_limpo = cnpj.replace(".", "").replace("/", "").replace("-", "").strip()
+    try:
+        r = httpx.get(
+            f"{SUPABASE_URL}/rest/v1/fornecedores",
+            headers=_headers(),
+            params={"cnpj": f"eq.{cnpj_limpo}", "empresa_id": f"eq.{EMPRESA_ID}", "select": "id"},
+            timeout=10,
+        )
+        if r.status_code == 200 and r.json():
+            return r.json()[0]["id"]
+    except Exception:
+        pass
+    return None
 
 
 def _batch_peca_ids(codigos: list) -> dict:
@@ -156,13 +159,15 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
         cur.execute("""
             SELECT
                 ne.NOT_CODIGO,
-                ne.NOT_COMPROVANTE,
+                ne.NOT_NRONOTA,
                 ne.NOT_DATAEMISSAO,
-                ne.NOT_VALORTOTAL,
+                ne.NOT_VALORNOTA,
                 ne.NOT_SERIE,
-                ne.NOT_FICHA
+                ne.NOT_CNPJ
             FROM NOTAENTRADA ne
             WHERE ne.NOT_DATA >= ?
+              AND ne.NOT_NRONOTA IS NOT NULL
+              AND TRIM(ne.NOT_NRONOTA) != ''
             ORDER BY ne.NOT_DATA DESC
         """, [data_corte])
 
@@ -176,24 +181,22 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
 
         for nota in notas:
             not_codigo   = nota[0]
-            comprovante  = _s(nota[1])
+            numero_nf    = _s(nota[1])
             data_emissao = str(nota[2])[:10] if nota[2] else None
             valor_total  = _f(nota[3])
             serie        = _s(nota[4]) or None
-            ficha_codigo = nota[5]
+            cnpj         = _s(nota[5]).replace(".", "").replace("/", "").replace("-", "").strip()
 
-            # Usa numero do comprovante se existir, senao usa codigo interno
-            if comprovante and comprovante != 'SN':
-                numero_nf = comprovante
-            else:
-                numero_nf = f"ENF-{not_codigo}"
+            if not numero_nf:
+                continue
 
-            cnpj = _get_cnpj_ficha(cur, ficha_codigo)
             if cnpj in CNPJS_BLOQUEADOS:
                 continue
 
             if _nf_ja_existe(numero_nf):
                 continue
+
+            fornecedor_id = _get_fornecedor_id(cnpj) if cnpj else None
 
             cur.execute("""
                 SELECT m.MOV_PRODUTO, m.MOV_QTDE, m.MOV_VALORUNI, p.PRO_NOME
@@ -216,6 +219,7 @@ def puxar_nfs_enfoque(delta_desde=None) -> int:
                 "numero_nf":        numero_nf,
                 "serie":            serie,
                 "data_emissao":     data_emissao,
+                "fornecedor_id":    fornecedor_id,
                 "valor_total_nota": valor_total,
                 "origem_compra":    "enfoque",
                 "status":           "ATIVA",
