@@ -1,7 +1,7 @@
 """
 api/main.py — API REST: lê do banco local, escreve local + fila para Enfoque
 
-Instalar:  pip install fastapi uvicorn fdb python-dotenv httpx
+Instalar:  pip install fastapi uvicorn fdb python-dotenv
 Rodar:     uvicorn api.main:app --host 0.0.0.0 --port 8000
 Docs:      http://localhost:8000/docs
 """
@@ -14,15 +14,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import core.local_db as db
 from core.sync_worker import puxar_enfoque, enviar_fila, enfoque_online, _conectar
-from core.nf_sync import puxar_nfs_enfoque
 
 app = FastAPI(
     title="Estoque Bridge — Enfoque ↔ AutoPeças Pro",
-    version="1.2.0"
+    version="1.1.0"
 )
 
 app.add_middleware(
@@ -229,8 +228,6 @@ def _get_or_create(cur, tabela, campo_id, campo_nome, gerador, nome: str) -> int
     )
     return new_id
 
-# ─── Atualizar produto ────────────────────────────────────────
-
 @app.put("/produto/{codigo}")
 def atualizar_produto(codigo: int, dados: ProdutoAtualizar):
     con = _conectar()
@@ -351,8 +348,6 @@ def atualizar_produto(codigo: int, dados: ProdutoAtualizar):
     finally:
         con.close()
 
-# ─── Produto completo ─────────────────────────────────────────
-
 @app.get("/produto/{codigo}/completo")
 def produto_completo(codigo: int):
     con = _conectar()
@@ -434,8 +429,6 @@ def produto_completo(codigo: int):
     finally:
         con.close()
 
-# ─── Listagens auxiliares ─────────────────────────────────────
-
 @app.get("/grupos")
 def listar_grupos():
     con = _conectar()
@@ -472,14 +465,11 @@ def listar_marcas():
     finally:
         con.close()
 
-# ─── Sync ─────────────────────────────────────────────────────
-
 @app.post("/sync/puxar")
 def sync_puxar(completo: bool = Query(False)):
     s = db.status_sync()
     delta_desde = None if completo else s.get("ultima_sync")
     n = puxar_enfoque(delta_desde=delta_desde)
-    puxar_nfs_enfoque()
     return {"sincronizados": n, "modo": "completo" if completo else "delta"}
 
 @app.post("/sync/enviar")
@@ -498,10 +488,7 @@ def sync_delta():
     s = db.status_sync()
     delta_desde = s.get("ultima_sync")
     n = puxar_enfoque(delta_desde=delta_desde)
-    puxar_nfs_enfoque()
     return {"sincronizados": n, "modo": "delta"}
-
-# ─── Histórico de movimentações ───────────────────────────────
 
 @app.get("/produto/{codigo}/historico")
 def produto_historico(codigo: int, limit: int = Query(100, le=500)):
