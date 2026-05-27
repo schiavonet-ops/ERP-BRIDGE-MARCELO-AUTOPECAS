@@ -7,7 +7,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 RUN mkdir -p data
-RUN printf '*/15 * * * * cd /app && PYTHONPATH=/app /usr/local/bin/python3 -m core.sync_worker delta >> /app/data/cron.log 2>&1\n*/15 * * * * cd /app && PYTHONPATH=/app /usr/local/bin/python3 -m core.nf_sync >> /app/data/nf_sync.log 2>&1\n' | crontab -
+RUN printf '*/15 * * * * cd /app && SUPABASE_URL=https://avxqyrkaddvtdogjsrtm.supabase.co SUPABASE_SERVICE_ROLE_KEY=sb_secret_hws2_EPyG6klbc9vpQzkCw_irP1AhuO EMPRESA_ID=1c668e79-80a9-4d44-af1b-8b2ecce623aa PYTHONPATH=/app /usr/local/bin/python3 -m core.sync_worker delta >> /app/data/cron.log 2>&1\n*/15 * * * * cd /app && SUPABASE_URL=https://avxqyrkaddvtdogjsrtm.supabase.co SUPABASE_SERVICE_ROLE_KEY=sb_secret_hws2_EPyG6klbc9vpQzkCw_irP1AhuO EMPRESA_ID=1c668e79-80a9-4d44-af1b-8b2ecce623aa PYTHONPATH=/app /usr/local/bin/python3 -m core.nf_sync >> /app/data/nf_sync.log 2>&1\n' | crontab -
 ENV PYTHONPATH=/app
 ENV FB_DLL=/usr/lib/x86_64-linux-gnu/libfbclient.so.2
 ENV FB_HOST=168.205.222.164
