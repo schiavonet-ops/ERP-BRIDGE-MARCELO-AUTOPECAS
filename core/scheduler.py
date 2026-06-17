@@ -5,8 +5,8 @@ Estratégia híbrida: ajusta o intervalo de sync conforme atividade detectada.
 Reduz drasticamente o egress quando não há mudanças.
 
 Estados (ciclos):
-  ATIVO  → 10s  (algo mudou no último ciclo)
-  NORMAL → 30s  (padrão)
+  ATIVO  → 20s  (algo mudou no último ciclo)
+  NORMAL → 35s  (padrão)
   IDLE   → 2min (10 ciclos sem mudança)
   SLEEP  → 5min (30 ciclos sem mudança)
 
@@ -25,8 +25,8 @@ from core.nf_sync import puxar_nfs_enfoque
 # ─── Configuração dos estados ──────────────────────────────────
 
 ESTADOS = {
-    "ATIVO":  10,    # 10 segundos
-    "NORMAL": 30,    # 30 segundos
+    "ATIVO":  20,    # 20 segundos
+    "NORMAL": 35,    # 35 segundos
     "IDLE":   120,   # 2 minutos
     "SLEEP":  300,   # 5 minutos
 }
@@ -118,7 +118,7 @@ def rodar_loop():
 
             # 6. Sync de NFs a cada 30 min apenas
             contador_nfs += 1
-            if contador_nfs >= 60:  # ~30 min em estado NORMAL
+            if contador_nfs >= 50:  # ~30 min em estado NORMAL (50 × 35s)
                 try:
                     puxar_nfs_enfoque()
                 except Exception as e:
