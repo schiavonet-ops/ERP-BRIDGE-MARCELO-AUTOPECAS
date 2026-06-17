@@ -72,14 +72,19 @@ def _parse_memo_local(memo_raw: str):
         (co if modo == "co" else ap).append(s)
     return "\n".join(ap), "\n".join(co)
 
-def puxar_enfoque(delta_desde=None, codigo=None) -> int:
+def puxar_enfoque(delta_desde=None, codigo=None) -> tuple[int, int]:
+    """
+    Retorna (puxados, enviados_supabase).
+    - puxados: total lido do Firebird
+    - enviados_supabase: quantos realmente mudaram e foram enviados ao Supabase
+    """
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Conectando ao Enfoque...")
     try:
         con = _conectar()
     except Exception as e:
         print(f"  ✗ Enfoque offline: {e}")
         log("erro", str(e))
-        return 0
+        return 0, 0
 
     cur = con.cursor()
 
@@ -185,18 +190,19 @@ def puxar_enfoque(delta_desde=None, codigo=None) -> int:
         })
     con.close()
 
+    enviados_supabase = 0
     if produtos:
         # Salva no SQLite local sempre
         upsert_produtos(produtos)
-        # Envia ao Supabase APENAS se valores mudaram — evita loop de egress
-        enviados_supa = upsert_produtos_supabase_se_mudou(produtos)
-        msg = f"Puxados {len(produtos)} produtos {'(delta)' if delta_desde else '(completo)'}, {enviados_supa} enviados ao Supabase"
+        # Envia ao Supabase APENAS se valores mudaram — evita loop de egress/I/O
+        enviados_supabase = upsert_produtos_supabase_se_mudou(produtos)
+        msg = f"Puxados {len(produtos)} produtos {'(delta)' if delta_desde else '(completo)'}, {enviados_supabase} enviados ao Supabase"
         print(f"  ✓ {msg}")
         log("sync_ok", msg)
     else:
         print("  — Nenhuma alteração")
 
-    return len(produtos)
+    return len(produtos), enviados_supabase
 
 def enviar_fila() -> dict:
     itens = pendentes()
@@ -347,7 +353,8 @@ if __name__ == "__main__":
             if isinstance(ultima, str):
                 ultima = datetime.fromisoformat(ultima)
             ultima = ultima - timedelta(hours=3)
-        puxar_enfoque(delta_desde=ultima)
+        resultado = puxar_enfoque(delta_desde=ultima)
+        print(f"Resultado: {resultado[0]} puxados, {resultado[1]} enviados ao Supabase")
         enviar_fila()
     elif cmd == "fila":
         enviar_fila()
