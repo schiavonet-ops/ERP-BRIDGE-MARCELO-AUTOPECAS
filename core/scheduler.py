@@ -6,13 +6,16 @@ Reduz drasticamente o egress quando não há mudanças.
 
 Estados (ciclos):
   ATIVO  → 20s  (algo mudou no último ciclo)
-  NORMAL → 35s  (padrão)
-  IDLE   → 2min (10 ciclos sem mudança)
-  SLEEP  → 5min (30 ciclos sem mudança)
+  NORMAL → 2min (padrão)
+  IDLE   → 5min (10 ciclos sem mudança)
+  SLEEP  → 15min (30 ciclos sem mudança)
 
 Acorda imediatamente se detectar:
   - Fila local com itens pendentes (OS baixou peça)
   - Hora comercial (8h-18h em dia útil) → nunca entra em SLEEP
+
+CORREÇÃO: ciclos_sem_mudanca agora usa enviados_supabase (mudanças reais)
+e não puxados (que sempre é > 0 mesmo sem mudança).
 """
 
 import time
@@ -25,10 +28,10 @@ from core.nf_sync import puxar_nfs_enfoque
 # ─── Configuração dos estados ──────────────────────────────────
 
 ESTADOS = {
-    "ATIVO":  20,    # 20 segundos
-    "NORMAL": 35,    # 35 segundos
-    "IDLE":   120,   # 2 minutos
-    "SLEEP":  300,   # 5 minutos
+    "ATIVO":  20,     # 20 segundos — mudança detectada
+    "NORMAL": 120,    # 2 minutos   — padrão
+    "IDLE":   300,    # 5 minutos   — sem mudança há algum tempo
+    "SLEEP":  900,    # 15 minutos  — sem mudança há muito tempo
 }
 
 # Quantos ciclos sem mudança até trocar de estado
@@ -75,11 +78,11 @@ def _decidir_estado(ciclos_sem_mudanca: int, fila_pendente: int) -> str:
 def rodar_loop():
     """Loop principal do scheduler adaptativo."""
     ciclos_sem_mudanca = 0
-    estado_atual = "ATIVO"
-    contador_nfs = 0  # NFs só a cada 30 min (independente do estado)
+    estado_atual = "NORMAL"
+    contador_nfs = 0  # NFs só a cada ~30 min
 
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Scheduler adaptativo iniciado")
-    log("scheduler_start", "Scheduler adaptativo iniciado")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Scheduler adaptativo iniciado (v2 - fix I/O)")
+    log("scheduler_start", "Scheduler adaptativo v2 iniciado - fix loop I/O")
 
     while True:
         try:
@@ -91,14 +94,15 @@ def rodar_loop():
             # 2. Decide estado
             novo_estado = _decidir_estado(ciclos_sem_mudanca, fila)
             if novo_estado != estado_atual:
-                print(f"[{ts_inicio.strftime('%H:%M:%S')}] Estado: {estado_atual} → {novo_estado}")
+                print(f"[{ts_inicio.strftime('%H:%M:%S')}] Estado: {estado_atual} → {novo_estado} (ciclos parados: {ciclos_sem_mudanca})")
                 log("scheduler_estado", f"{estado_atual} → {novo_estado} (ciclos parados: {ciclos_sem_mudanca})")
                 estado_atual = novo_estado
 
-            # 3. Verifica se Enfoque está online (sem fazer requisição cara)
+            # 3. Verifica se Enfoque está online
             if not enfoque_online():
                 ciclos_sem_mudanca += 1
                 intervalo = ESTADOS[estado_atual]
+                print(f"[{ts_inicio.strftime('%H:%M:%S')}] Enfoque offline — aguardando {intervalo}s")
                 time.sleep(intervalo)
                 continue
 
@@ -110,26 +114,38 @@ def rodar_loop():
                     ultima = datetime.fromisoformat(ultima)
                 ultima = ultima - timedelta(hours=3)  # Ajuste BRT → UTC
 
-            puxados = puxar_enfoque(delta_desde=ultima)
+            # puxar_enfoque retorna (puxados, enviados_supabase)
+            resultado = puxar_enfoque(delta_desde=ultima)
+            # Compatibilidade: se retornar só int (versão antiga), trata como (n, 0)
+            if isinstance(resultado, tuple):
+                puxados, enviados_supabase = resultado
+            else:
+                puxados, enviados_supabase = resultado, 0
 
             # 5. Envia fila (se houver)
             if fila > 0:
                 enviar_fila()
 
-            # 6. Sync de NFs a cada 30 min apenas
+            # 6. Sync de NFs a cada ~30 min
             contador_nfs += 1
-            if contador_nfs >= 50:  # ~30 min em estado NORMAL (50 × 35s)
+            intervalo_nf = max(1, 1800 // ESTADOS[estado_atual])  # ~30 min em qualquer estado
+            if contador_nfs >= intervalo_nf:
                 try:
                     puxar_nfs_enfoque()
                 except Exception as e:
                     log("erro", f"NFs sync: {e}")
                 contador_nfs = 0
 
-            # 7. Atualiza contador de ciclos sem mudança
-            if puxados > 0 or fila > 0:
+            # 7. CORREÇÃO CRÍTICA: usa enviados_supabase para detectar mudanças reais
+            # puxados sempre > 0 (lê do Firebird sempre), mas enviados_supabase
+            # só > 0 quando algo realmente mudou no hash
+            if enviados_supabase > 0 or fila > 0:
                 ciclos_sem_mudanca = 0
+                print(f"[{ts_inicio.strftime('%H:%M:%S')}] {enviados_supabase} mudanças reais enviadas ao Supabase")
             else:
                 ciclos_sem_mudanca += 1
+                if ciclos_sem_mudanca % 5 == 0:
+                    print(f"[{ts_inicio.strftime('%H:%M:%S')}] Sem mudanças há {ciclos_sem_mudanca} ciclos — estado: {estado_atual}")
 
             # 8. Aguarda intervalo do estado atual
             intervalo = ESTADOS[estado_atual]
@@ -143,7 +159,7 @@ def rodar_loop():
         except Exception as e:
             print(f"[ERRO] {e}")
             log("erro", f"Loop scheduler: {e}")
-            time.sleep(60)  # erro → espera 1 min antes de tentar de novo
+            time.sleep(60)
 
 
 if __name__ == "__main__":
