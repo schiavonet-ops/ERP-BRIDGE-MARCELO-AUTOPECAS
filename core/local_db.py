@@ -7,6 +7,8 @@ Funciona mesmo com o Enfoque desligado.
 
 import sqlite3
 import os
+import hashlib
+import json
 from datetime import datetime
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "estoque_local.db")
@@ -57,6 +59,13 @@ def inicializar():
             mensagem    TEXT,
             data        TEXT DEFAULT (datetime('now','localtime'))
         );
+
+        -- Tabela de hashes para detectar mudanças reais antes de enviar ao Supabase
+        CREATE TABLE IF NOT EXISTS produto_hash (
+            codigo      INTEGER PRIMARY KEY,
+            hash        TEXT NOT NULL,
+            enviado_em  TEXT
+        );
     """)
     con.commit()
     con.close()
@@ -93,7 +102,6 @@ def _migrar_colunas():
         if nome_col not in existentes:
             cur.execute(f"ALTER TABLE produto ADD COLUMN {nome_col} {definicao}")
 
-    # Índices para busca rápida em todos os campos
     indices = [
         ("idx_produto_aplicacao",     "aplicacao"),
         ("idx_produto_conversao",     "conversao"),
@@ -109,10 +117,33 @@ def _migrar_colunas():
     con.commit()
     con.close()
 
+# ─── Hash de produto para detectar mudanças reais ─────────────
+
+def _hash_produto(p: dict) -> str:
+    """Gera hash dos campos que importam — ignora metadados como ultima_sync."""
+    campos = {
+        "nome":         p.get("nome", ""),
+        "cod_fabricante": p.get("cod_fabricante", ""),
+        "localizacao":  p.get("localizacao", ""),
+        "estoque":      round(float(p.get("estoque", 0)), 4),
+        "preco_venda":  round(float(p.get("preco_venda", 0)), 4),
+        "custo":        round(float(p.get("custo", 0)), 4),
+        "custo_medio":  round(float(p.get("custo_medio", 0)), 4),
+        "margem":       round(float(p.get("margem", 0)), 4),
+        "perc_fixo":    round(float(p.get("perc_fixo", 0)), 4),
+        "perc_imposto": round(float(p.get("perc_imposto", 0)), 4),
+        "perc_comissao":round(float(p.get("perc_comissao", 0)), 4),
+        "perc_outros":  round(float(p.get("perc_outros", 0)), 4),
+        "ncm":          p.get("ncm", ""),
+        "aplicacao":    p.get("aplicacao", ""),
+        "conversao":    p.get("conversao", ""),
+    }
+    return hashlib.md5(json.dumps(campos, sort_keys=True).encode()).hexdigest()
+
 # ─── Produtos ────────────────────────────────────────────────
 
 def upsert_produtos(produtos: list[dict]):
-    """Insere ou atualiza produtos vindos do Enfoque."""
+    """Insere ou atualiza produtos no SQLite local."""
     con = get_con()
     agora = datetime.now().isoformat()
     con.executemany("""
@@ -181,6 +212,91 @@ def upsert_produtos(produtos: list[dict]):
     con.commit()
     con.close()
 
+def upsert_produtos_supabase_se_mudou(produtos: list[dict]) -> int:
+    """
+    Envia ao Supabase APENAS produtos cujos valores realmente mudaram.
+    Usa hash MD5 dos campos relevantes para detectar mudanças.
+    Retorna quantos produtos foram enviados.
+    """
+    try:
+        import httpx
+        import os
+        SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+        SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+        if not SUPABASE_URL or not SUPABASE_KEY:
+            return 0
+
+        con = get_con()
+        agora = datetime.now().isoformat()
+        enviados = 0
+
+        for p in produtos:
+            codigo = p["codigo"]
+            novo_hash = _hash_produto(p)
+
+            # Verifica hash anterior
+            row = con.execute(
+                "SELECT hash FROM produto_hash WHERE codigo = ?", (codigo,)
+            ).fetchone()
+
+            if row and row["hash"] == novo_hash:
+                # Nada mudou — não envia ao Supabase
+                continue
+
+            # Mudou — envia ao Supabase
+            payload = {
+                "pro_codigo":        str(codigo),
+                "pro_nome":          p.get("nome", ""),
+                "pro_codproprio":    p.get("cod_fabricante", ""),
+                "pro_codbarra":      p.get("cod_barras", ""),
+                "pro_localizacao":   p.get("localizacao", ""),
+                "pro_ncm":           p.get("ncm", ""),
+                "pro_isativo":       "1",
+                "pro_ismercadoria":  "1",
+                "est_qtde":          str(p.get("estoque", 0)),
+                "est_venda":         str(p.get("preco_venda", 0)),
+                "est_custo":         str(p.get("custo", 0)),
+                "est_customedio":    str(p.get("custo_medio", 0)),
+                "est_margem":        str(p.get("margem", 0)),
+                "est_percfixo":      str(p.get("perc_fixo", 0)),
+                "est_percimposto":   str(p.get("perc_imposto", 0)),
+                "est_perccomissao":  str(p.get("perc_comissao", 0)),
+                "est_percoutros":    str(p.get("perc_outros", 0)),
+            }
+
+            try:
+                resp = httpx.post(
+                    f"{SUPABASE_URL}/rest/v1/enfoque_produto",
+                    headers={
+                        "apikey": SUPABASE_KEY,
+                        "Authorization": f"Bearer {SUPABASE_KEY}",
+                        "Content-Type": "application/json",
+                        "Prefer": "resolution=merge-duplicates",
+                    },
+                    json=payload,
+                    timeout=10,
+                )
+                if resp.status_code in (200, 201):
+                    # Atualiza hash no SQLite local
+                    con.execute("""
+                        INSERT INTO produto_hash (codigo, hash, enviado_em)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(codigo) DO UPDATE SET
+                            hash = excluded.hash,
+                            enviado_em = excluded.enviado_em
+                    """, (codigo, novo_hash, agora))
+                    enviados += 1
+            except Exception:
+                pass  # Falha silenciosa — próximo ciclo tenta de novo
+
+        con.commit()
+        con.close()
+        return enviados
+
+    except Exception as e:
+        log("erro", f"upsert_supabase_se_mudou: {e}")
+        return 0
+
 def get_produto(codigo: int) -> dict | None:
     con = get_con()
     row = con.execute(
@@ -190,10 +306,6 @@ def get_produto(codigo: int) -> dict | None:
     return dict(row) if row else None
 
 def buscar_produtos(texto: str, limit: int = 100) -> list[dict]:
-    """
-    Busca em TODOS os campos — nome, código, fabricante, aplicação, conversão, marca, etc.
-    Suporta múltiplas palavras (AND): "tampa mb" encontra produtos com "tampa" E "mb" em qualquer campo.
-    """
     palavras = [p.strip() for p in texto.replace("-", " ").split() if p.strip()]
     if not palavras:
         return []
@@ -222,7 +334,6 @@ def buscar_produtos(texto: str, limit: int = 100) -> list[dict]:
 
     where_clause = " AND ".join(condicoes)
 
-    # Parâmetros de ordenação: código exato primeiro, depois nome
     rows = con.execute(f"""
         SELECT * FROM produto
         WHERE {where_clause}
