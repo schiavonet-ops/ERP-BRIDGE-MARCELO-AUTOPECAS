@@ -10,7 +10,7 @@ _fbcore.b2u = lambda st, cs: st.decode('cp1252', errors='replace') if isinstance
 import os
 import sys
 from datetime import date, datetime
-from core.local_db import upsert_produtos, pendentes, marcar_enviado, marcar_erro, log
+from core.local_db import upsert_produtos, upsert_produtos_supabase_se_mudou, pendentes, marcar_enviado, marcar_erro, log
 
 if sys.platform == "win32":
     FBCLIENT = os.getenv("FB_DLL", r"C:\Program Files\Firebird\Firebird_3_0\fbclient.dll")
@@ -89,7 +89,6 @@ def puxar_enfoque(delta_desde=None, codigo=None) -> int:
         filtro = "AND p.PRO_CODIGO = ?"
         params.append(codigo)
     elif delta_desde:
-        # CORRIGIDO: detecta vendas, OS, condicionais e ajustes via MOVESTOQUE e ESTOQUE
         filtro = """AND (
             p.PRO_DATAALTERACAO >= ?
             OR p.PRO_CODIGO IN (
@@ -105,7 +104,6 @@ def puxar_enfoque(delta_desde=None, codigo=None) -> int:
         params.append(delta_desde)
         params.append(delta_desde)
 
-    # Carrega tabelas auxiliares para resolução de nomes
     def _s(v):
         if v is None: return ""
         if isinstance(v, bytes): return v.decode("cp1252", errors="replace").strip()
@@ -188,8 +186,11 @@ def puxar_enfoque(delta_desde=None, codigo=None) -> int:
     con.close()
 
     if produtos:
+        # Salva no SQLite local sempre
         upsert_produtos(produtos)
-        msg = f"Puxados {len(produtos)} produtos {'(delta)' if delta_desde else '(completo)'}"
+        # Envia ao Supabase APENAS se valores mudaram — evita loop de egress
+        enviados_supa = upsert_produtos_supabase_se_mudou(produtos)
+        msg = f"Puxados {len(produtos)} produtos {'(delta)' if delta_desde else '(completo)'}, {enviados_supa} enviados ao Supabase"
         print(f"  ✓ {msg}")
         log("sync_ok", msg)
     else:
@@ -229,7 +230,6 @@ def enviar_fila() -> dict:
     return {"enviados": enviados, "erros": erros}
 
 def _get_estoque_atual(cur, codigo):
-    """Retorna estoque atual via PRODUTOINVENTARIO e custos/precos do MOVESTOQUE mais recente."""
     cur.execute("""
         SELECT FIRST 1
             MOV_CUSTO, MOV_CUSTOMEDIO, MOV_CUSTOPROPRIO,
@@ -284,7 +284,6 @@ def _aplicar_firebird(cur, item):
 
     hoje = date.today()
 
-    # 1. Cria NOTAENTRADA
     cur.execute("SELECT GEN_ID(NOTAENTRADA, 1) FROM RDB" + chr(36) + "DATABASE")
     not_codigo = cur.fetchone()[0]
 
@@ -297,7 +296,6 @@ def _aplicar_firebird(cur, item):
         ) VALUES (?, 1, 2, 'SN', ?, ?, ?, ?, 1, ?)
     """, (not_codigo, hoje, hoje, hoje, descricao, datetime.now()))
 
-    # 2. Cria MOVESTOQUE
     cur.execute("SELECT GEN_ID(MOVESTOQUE, 1) FROM RDB" + chr(36) + "DATABASE")
     mov_codigo = cur.fetchone()[0]
 
@@ -331,7 +329,6 @@ def _aplicar_firebird(cur, item):
         codigo
     ))
 
-    # 3. Atualiza PRO_DATAALTERACAO no PRODUTO
     cur.execute(
         "UPDATE PRODUTO SET PRO_DATAALTERACAO = CURRENT_TIMESTAMP WHERE PRO_CODIGO = ?",
         (codigo,)
@@ -349,7 +346,6 @@ if __name__ == "__main__":
         if ultima:
             if isinstance(ultima, str):
                 ultima = datetime.fromisoformat(ultima)
-            # Enfoque usa BRT (UTC-3); VPS usa UTC: ajusta fuso
             ultima = ultima - timedelta(hours=3)
         puxar_enfoque(delta_desde=ultima)
         enviar_fila()
