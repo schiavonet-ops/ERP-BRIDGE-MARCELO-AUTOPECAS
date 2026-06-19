@@ -5,9 +5,9 @@ api/main.py — API REST: lê do banco local, escreve local + fila para Enfoque
 import sys, os, re, threading
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timedelta
@@ -27,6 +27,58 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ─── OAuth 2.0 — endpoints de descoberta para MCP connector (Claude.ai) ──────
+# Claude.ai exige RFC 8414 antes de aceitar qualquer MCP customizado.
+# Estes endpoints não fazem login real — devolvem o Bearer token estático.
+# O token real continua sendo validado no mcp_handler.py normalmente.
+
+_MCP_BEARER_TOKEN = "mrc_z6QAzFyDhfUjn0Kc2Fqf6Qwxdf0G_7VVj6GlFXdWr64"
+_BASE_URL = "https://sync.oficinaconecatada.tech"
+
+@app.get("/.well-known/oauth-authorization-server", include_in_schema=False)
+def oauth_metadata():
+    """RFC 8414 — Authorization Server Metadata. Requerido pelo Claude.ai MCP."""
+    return {
+        "issuer": _BASE_URL,
+        "authorization_endpoint": f"{_BASE_URL}/oauth/authorize",
+        "token_endpoint": f"{_BASE_URL}/oauth/token",
+        "response_types_supported": ["token"],
+        "grant_types_supported": ["client_credentials"],
+        "token_endpoint_auth_methods_supported": ["none"],
+        "scopes_supported": ["mcp"],
+    }
+
+@app.api_route("/oauth/token", methods=["GET", "POST"], include_in_schema=False)
+async def oauth_token():
+    """Token endpoint — devolve o Bearer token estático direto."""
+    return {
+        "access_token": _MCP_BEARER_TOKEN,
+        "token_type": "bearer",
+        "expires_in": 315360000,
+        "scope": "mcp",
+    }
+
+@app.get("/oauth/authorize", include_in_schema=False)
+async def oauth_authorize(
+    redirect_uri: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    response_type: Optional[str] = Query(None),
+    client_id: Optional[str] = Query(None),
+):
+    """Authorize endpoint — implicit flow, redireciona com token na URL."""
+    if redirect_uri:
+        sep = "&" if "?" in redirect_uri else "?"
+        dest = f"{redirect_uri}{sep}access_token={_MCP_BEARER_TOKEN}&token_type=bearer"
+        if state:
+            dest += f"&state={state}"
+        return RedirectResponse(url=dest, status_code=302)
+    # Fallback: retorna o token direto se não houver redirect_uri
+    return {
+        "access_token": _MCP_BEARER_TOKEN,
+        "token_type": "bearer",
+        "scope": "mcp",
+    }
 
 # ─── Schemas ──────────────────────────────────────────────────
 
