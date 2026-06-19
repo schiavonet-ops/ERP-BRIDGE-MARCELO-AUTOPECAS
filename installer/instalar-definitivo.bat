@@ -1,198 +1,161 @@
 @echo off
-chcp 65001 >nul
-REM ============================================================
-REM  INSTALADOR DEFINITIVO - WinSync via Task Scheduler
-REM  Marcelo Auto Pecas
-REM
-REM  O que faz:
-REM   1. Remove servico Windows quebrado (se existir)
-REM   2. Cria tarefa agendada que inicia no boot
-REM   3. Configura restart automatico em caso de falha
-REM   4. Cria watchdog que verifica a cada 5 min
-REM   5. Inicia o worker agora
-REM
-REM  Como usar: clique com botao direito > Executar como administrador
-REM ============================================================
-
 title Instalador WinSync - Marcelo Auto Pecas
 color 0A
 
-echo.
-echo ============================================================
-echo   INSTALADOR DEFINITIVO WinSync
-echo   Marcelo Auto Pecas
-echo ============================================================
-echo.
-
-REM Verifica admin
+REM ============================================================
+REM  Verificar Administrador
+REM ============================================================
 net session >nul 2>&1
-if %errorlevel% neq 0 (
+if errorlevel 1 (
     color 0C
-    echo ERRO: Este script precisa ser executado como Administrador.
     echo.
-    echo Feche esta janela, clique com botao direito no arquivo
-    echo e escolha "Executar como administrador".
+    echo  ERRO: Esse arquivo precisa ser executado como Administrador.
+    echo.
+    echo  1. Feche essa janela
+    echo  2. Clique com o botao DIREITO no arquivo
+    echo  3. Escolha "Executar como administrador"
     echo.
     pause
     exit /b 1
 )
 
-REM Caminhos
 set BASE=C:\MarceloWebEPP
-set PYTHON=%BASE%\venv\Scripts\pythonw.exe
-set PYTHON_FALLBACK=%BASE%\venv\Scripts\python.exe
-set SCRIPT=%BASE%\monitor\worker.py
-set LOG_DIR=%BASE%\logs
-set TASK_WORKER=WinSyncWorker
-set TASK_WATCHDOG=WinSyncWatchdog
+set PY=%BASE%\venv\Scripts\python.exe
+set WORKER=%BASE%\monitor\worker.py
+set WRAPPER=%BASE%\monitor\run-worker.bat
+set LOGDIR=%BASE%\logs
 
-REM Detecta python (pythonw para rodar escondido, senao python normal)
-if not exist "%PYTHON%" set PYTHON=%PYTHON_FALLBACK%
-if not exist "%PYTHON%" (
+echo.
+echo ============================================================
+echo   INSTALADOR WinSync - Marcelo Auto Pecas
+echo ============================================================
+echo.
+
+REM ============================================================
+REM  Verificar arquivos
+REM ============================================================
+echo [1/7] Verificando arquivos...
+
+if not exist "%PY%" (
     color 0C
-    echo ERRO: Python nao encontrado em %BASE%\venv\Scripts\
     echo.
-    echo Verifique se o ambiente virtual foi criado corretamente.
+    echo  ERRO: Python nao encontrado em:
+    echo    %PY%
+    echo.
+    echo  Verifique se a pasta C:\MarceloWebEPP\venv existe.
+    echo.
     pause
     exit /b 1
 )
+echo      OK: Python encontrado
 
-if not exist "%SCRIPT%" (
+if not exist "%WORKER%" (
     color 0C
-    echo ERRO: Worker nao encontrado em %SCRIPT%
+    echo.
+    echo  ERRO: worker.py nao encontrado em:
+    echo    %WORKER%
+    echo.
     pause
     exit /b 1
 )
+echo      OK: worker.py encontrado
 
-if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
+if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 
-echo [1/6] Removendo servico Windows antigo (se existir)...
+REM ============================================================
+REM  Remover servico antigo (quebrado)
+REM ============================================================
+echo.
+echo [2/7] Removendo servico Windows antigo...
 sc query WinSyncSvc >nul 2>&1
-if %errorlevel% equ 0 (
+if not errorlevel 1 (
     sc stop WinSyncSvc >nul 2>&1
     timeout /t 3 /nobreak >nul
     sc delete WinSyncSvc >nul 2>&1
-    echo     Servico antigo removido.
+    echo      OK: Servico WinSyncSvc removido
 ) else (
-    echo     Nenhum servico antigo encontrado.
+    echo      OK: Nenhum servico antigo
 )
 
-echo [2/6] Removendo tarefas antigas (se existirem)...
-schtasks /Delete /TN "%TASK_WORKER%" /F >nul 2>&1
-schtasks /Delete /TN "%TASK_WATCHDOG%" /F >nul 2>&1
+REM ============================================================
+REM  Matar processos antigos do worker
+REM ============================================================
+echo.
+echo [3/7] Encerrando processos antigos do worker...
+wmic process where "name='python.exe' and commandline like '%%worker.py%%'" delete >nul 2>&1
+wmic process where "name='pythonw.exe' and commandline like '%%worker.py%%'" delete >nul 2>&1
+echo      OK
 
-echo [3/6] Criando tarefa principal: %TASK_WORKER%
-echo     - Inicia no boot do Windows
-echo     - Roda como SYSTEM (sem precisar login)
-echo     - Restart automatico em caso de falha
-
-REM Cria XML da tarefa principal
-set XML_WORKER=%TEMP%\winsync_worker.xml
+REM ============================================================
+REM  Criar wrapper .bat
+REM ============================================================
+echo.
+echo [4/7] Criando wrapper do worker...
 (
-echo ^<?xml version="1.0" encoding="UTF-16"?^>
-echo ^<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"^>
-echo   ^<RegistrationInfo^>
-echo     ^<Description^>WinSync Worker - sincronizacao Firebird ^<-^> Supabase EPP^</Description^>
-echo     ^<Author^>Marcelo Auto Pecas^</Author^>
-echo   ^</RegistrationInfo^>
-echo   ^<Triggers^>
-echo     ^<BootTrigger^>
-echo       ^<Enabled^>true^</Enabled^>
-echo       ^<Delay^>PT30S^</Delay^>
-echo     ^</BootTrigger^>
-echo   ^</Triggers^>
-echo   ^<Principals^>
-echo     ^<Principal id="Author"^>
-echo       ^<UserId^>S-1-5-18^</UserId^>
-echo       ^<RunLevel^>HighestAvailable^</RunLevel^>
-echo     ^</Principal^>
-echo   ^</Principals^>
-echo   ^<Settings^>
-echo     ^<MultipleInstancesPolicy^>IgnoreNew^</MultipleInstancesPolicy^>
-echo     ^<DisallowStartIfOnBatteries^>false^</DisallowStartIfOnBatteries^>
-echo     ^<StopIfGoingOnBatteries^>false^</StopIfGoingOnBatteries^>
-echo     ^<AllowHardTerminate^>true^</AllowHardTerminate^>
-echo     ^<StartWhenAvailable^>true^</StartWhenAvailable^>
-echo     ^<RunOnlyIfNetworkAvailable^>false^</RunOnlyIfNetworkAvailable^>
-echo     ^<IdleSettings^>
-echo       ^<StopOnIdleEnd^>false^</StopOnIdleEnd^>
-echo       ^<RestartOnIdle^>false^</RestartOnIdle^>
-echo     ^</IdleSettings^>
-echo     ^<AllowStartOnDemand^>true^</AllowStartOnDemand^>
-echo     ^<Enabled^>true^</Enabled^>
-echo     ^<Hidden^>false^</Hidden^>
-echo     ^<RunOnlyIfIdle^>false^</RunOnlyIfIdle^>
-echo     ^<DisallowStartOnRemoteAppSession^>false^</DisallowStartOnRemoteAppSession^>
-echo     ^<UseUnifiedSchedulingEngine^>true^</UseUnifiedSchedulingEngine^>
-echo     ^<WakeToRun^>false^</WakeToRun^>
-echo     ^<ExecutionTimeLimit^>PT0S^</ExecutionTimeLimit^>
-echo     ^<Priority^>7^</Priority^>
-echo     ^<RestartOnFailure^>
-echo       ^<Interval^>PT1M^</Interval^>
-echo       ^<Count^>999^</Count^>
-echo     ^</RestartOnFailure^>
-echo   ^</Settings^>
-echo   ^<Actions Context="Author"^>
-echo     ^<Exec^>
-echo       ^<Command^>%PYTHON%^</Command^>
-echo       ^<Arguments^>"%SCRIPT%"^</Arguments^>
-echo       ^<WorkingDirectory^>%BASE%^</WorkingDirectory^>
-echo     ^</Exec^>
-echo   ^</Actions^>
-echo ^</Task^>
-) > "%XML_WORKER%"
+echo @echo off
+echo cd /d %BASE%
+echo set PYTHONIOENCODING=utf-8
+echo "%PY%" "%WORKER%" ^>^> "%LOGDIR%\worker.log" 2^>^&1
+) > "%WRAPPER%"
+echo      OK: %WRAPPER%
 
-schtasks /Create /TN "%TASK_WORKER%" /XML "%XML_WORKER%" /F >nul
-if %errorlevel% neq 0 (
+REM ============================================================
+REM  Remover task antiga
+REM ============================================================
+echo.
+echo [5/7] Removendo tarefa antiga (se existir)...
+schtasks /Delete /TN "WinSyncWorker" /F >nul 2>&1
+echo      OK
+
+REM ============================================================
+REM  Criar nova tarefa agendada
+REM ============================================================
+echo.
+echo [6/7] Criando tarefa agendada...
+schtasks /Create /TN "WinSyncWorker" /TR "\"%WRAPPER%\"" /SC ONSTART /DELAY 0000:30 /RU SYSTEM /RL HIGHEST /F >nul
+
+if errorlevel 1 (
     color 0C
-    echo     ERRO ao criar tarefa principal.
+    echo.
+    echo  ERRO: Falhou ao criar tarefa agendada.
     pause
     exit /b 1
 )
-echo     OK
+echo      OK: Tarefa WinSyncWorker criada
 
-echo [4/6] Criando watchdog: %TASK_WATCHDOG%
-echo     - Verifica a cada 5 minutos se o worker esta rodando
-echo     - Se nao estiver, inicia automaticamente
+REM Configurar restart-on-failure via PowerShell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $t = Get-ScheduledTask -TaskName 'WinSyncWorker' -ErrorAction Stop; $s = $t.Settings; $s.RestartCount = 999; $s.RestartInterval = 'PT1M'; $s.ExecutionTimeLimit = 'PT0S'; $s.StartWhenAvailable = $true; $s.DisallowStartIfOnBatteries = $false; $s.StopIfGoingOnBatteries = $false; $s.MultipleInstances = 'IgnoreNew'; Set-ScheduledTask -TaskName 'WinSyncWorker' -Settings $s | Out-Null } catch { exit 1 }" >nul 2>&1
+echo      OK: Restart automatico configurado (1 min, ate 999x)
 
-set WATCHDOG_BAT=%BASE%\monitor\watchdog.bat
-(
-echo @echo off
-echo REM Watchdog WinSync - verifica e reinicia se necessario
-echo schtasks /Query /TN "%TASK_WORKER%" /V /FO LIST 2^>nul ^| findstr /C:"Em execu" /C:"Running" ^>nul
-echo if %%errorlevel%% neq 0 ^(
-echo     echo [%%date%% %%time%%] Worker parado, reiniciando... ^>^> "%LOG_DIR%\watchdog.log"
-echo     schtasks /Run /TN "%TASK_WORKER%" ^>nul 2^>^&1
-echo ^)
-) > "%WATCHDOG_BAT%"
+REM ============================================================
+REM  Iniciar agora
+REM ============================================================
+echo.
+echo [7/7] Iniciando worker...
+schtasks /Run /TN "WinSyncWorker" >nul 2>&1
+timeout /t 5 /nobreak >nul
 
-schtasks /Create /TN "%TASK_WATCHDOG%" /TR "\"%WATCHDOG_BAT%\"" /SC MINUTE /MO 5 /RU SYSTEM /RL HIGHEST /F >nul
-if %errorlevel% neq 0 (
-    color 0E
-    echo     AVISO: watchdog nao foi criado, mas o worker principal esta OK.
+REM Verifica se realmente subiu
+tasklist /FI "IMAGENAME eq python.exe" 2>nul | findstr /I "python.exe" >nul
+if not errorlevel 1 (
+    echo      OK: Worker rodando
 ) else (
-    echo     OK
+    echo      AVISO: Worker pode estar inicializando. Verifique em 1 min.
 )
-
-echo [5/6] Iniciando o worker agora...
-schtasks /Run /TN "%TASK_WORKER%" >nul 2>&1
-timeout /t 3 /nobreak >nul
-echo     OK
-
-echo [6/6] Verificando status...
-schtasks /Query /TN "%TASK_WORKER%" /FO LIST | findstr /C:"Status" /C:"Próxima" /C:"Next"
 
 echo.
 echo ============================================================
 echo   INSTALACAO CONCLUIDA
 echo ============================================================
 echo.
-echo   - Worker inicia automaticamente quando o Windows liga
-echo   - Se travar, reinicia sozinho em 1 minuto (ate 999 tentativas)
-echo   - Watchdog verifica a cada 5 min e reinicia se necessario
-echo   - Logs em: %LOG_DIR%\
+echo   Tarefa criada: WinSyncWorker
+echo   Inicia: 30s apos ligar o PC
+echo   Restart: a cada 1 min se cair (ate 999x)
+echo   Logs: %LOGDIR%\worker.log
 echo.
-echo   Nao precisa mais rodar nenhum comando manual.
-echo   Pode desligar e ligar o PC normalmente.
+echo   Pode fechar essa janela.
+echo.
+echo   Se algo nao funcionar, abra %LOGDIR%\worker.log
+echo   para ver o erro real do Python.
 echo.
 pause
